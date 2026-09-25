@@ -6,3 +6,4 @@ pydantic==2.13.5
 email-validator==2.3.0
 httpx==0.28.1
 tzdata==2026.4
+python-multipart==0.0.32
