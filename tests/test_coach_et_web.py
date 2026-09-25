@@ -304,3 +304,10 @@ def test_aucune_cle_secrete_dans_le_frontend():
             texte = fichier.read_text(encoding="utf-8")
             assert "service_role" not in texte.replace("Ne JAMAIS mettre ici la clé service_role", ""), fichier
             assert "sb_secret_" not in texte, fichier
+
+
+def test_frontend_revalide_a_chaque_visite():
+    # Après un déploiement, les navigateurs doivent récupérer la nouvelle version des scripts
+    api = TestClient(app)
+    for chemin in ("/app/", "/app/client.js", "/app/coach/coach.js", "/app/commun.js"):
+        assert api.get(chemin).headers["cache-control"] == "no-cache", chemin

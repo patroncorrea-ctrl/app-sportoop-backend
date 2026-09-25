@@ -135,14 +135,35 @@ function ecranSansAcces(e) {
   racine.innerHTML = `
     <div class="min-h-screen flex flex-col items-center justify-center gap-4 p-6 text-center">
       <p class="text-lg max-w-md">${esc(message)}</p>
-      ${lienCoach ? `<a href="coach/" class="text-emerald-400 underline">Vous êtes coach ? Accéder à l'espace coach</a>` : ""}
+      <p id="compte-connecte" class="text-sm text-slate-400 max-w-md"></p>
+      ${lienCoach ? `<a href="coach/" id="lien-coach" class="text-emerald-400 underline">Vous êtes coach ? Accéder à l'espace coach</a>` : ""}
       <div class="flex gap-2">
         ${reessayer ? `<button id="reessayer" class="bouton">Réessayer</button>` : ""}
-        <button id="deco" class="bouton-sec">Se déconnecter</button>
+        <button id="deco" class="bouton-sec">${lienCoach ? "Se connecter avec un autre compte" : "Se déconnecter"}</button>
       </div>
     </div>`;
   $("#reessayer")?.addEventListener("click", () => location.reload());
   $("#deco").onclick = deconnexion;
+  if (lienCoach) preciserCompteConnecte();
+}
+
+/**
+ * Compte sans fiche client : on indique avec quel compte on est connecté. Le cas courant est le coach qui ouvre
+ * l'application client dans le même navigateur (session partagée entre /app/ et /app/coach/).
+ */
+async function preciserCompteConnecte() {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const email = session?.user?.email;
+    if (!email) return;
+    const { data: coach } = await supabase.from("coachs").select("user_id").eq("user_id", session.user.id).maybeSingle();
+    const zone = $("#compte-connecte");
+    if (!zone) return;
+    zone.textContent = coach
+      ? `Vous êtes connecté avec ${email}, le compte coach : il n'a pas d'espace nutrition. Pour voir l'application d'un client, connectez-vous avec son compte (bouton ci-dessous), ou utilisez un autre navigateur ou une fenêtre de navigation privée.`
+      : `Vous êtes connecté avec ${email}.`;
+    if (coach) $("#lien-coach")?.replaceChildren("Aller à l'espace coach");
+  } catch { /* information facultative */ }
 }
 
 /** Échec du chargement d'un onglet (panne passagère, réseau…) : message lisible et bouton Réessayer. */
@@ -423,10 +444,26 @@ function stopperLecteur(l) {
   } catch { /* déjà arrêté ou jamais démarré */ }
 }
 
+// Cadre affiché à la place de la vidéo tant que la caméra n'est pas ouverte (sinon la zone est invisible)
+const CADRE_CAMERA = "rounded-xl overflow-hidden bg-black mb-3 min-h-[180px] flex flex-col items-center justify-center gap-3 p-4 text-center text-sm text-slate-300";
+
+/** Explication claire d'un échec d'ouverture de la caméra (html5-qrcode rejette avec une chaîne ou une erreur). */
+function motifCamera(erreur) {
+  const texte = String(erreur?.name || "") + " " + String(erreur?.message || erreur || "");
+  if (!window.isSecureContext) return "La caméra n'est disponible que sur une page sécurisée (https).";
+  if (/NotAllowed|Permission|denied/i.test(texte))
+    return "Accès à la caméra refusé. Autorisez-le dans les réglages du navigateur (icône 🔒 ou ⓘ à côté de l'adresse), puis touchez « Réessayer ».";
+  if (/NotFound|Overconstrained|no camera|Requested device not found/i.test(texte))
+    return "Aucune caméra détectée sur cet appareil. Scannez depuis votre téléphone, ou saisissez le code ci-dessous.";
+  if (/NotReadable|in use|Could not start/i.test(texte))
+    return "La caméra est déjà utilisée par une autre application. Fermez-la, puis touchez « Réessayer ».";
+  return "Impossible d'ouvrir la caméra. Touchez « Réessayer », ou saisissez le code ci-dessous.";
+}
+
 /** Mode code-barres ; renvoie la fonction qui coupe la caméra (changement de mode, fermeture). */
 function modeScan(zone, typeRepas, m) {
   zone.innerHTML = `
-    <div id="lecteur" class="rounded-xl overflow-hidden bg-black mb-3"></div>
+    <div id="lecteur" class="${CADRE_CAMERA}"><span>📷 Ouverture de la caméra…<br>Autorisez l'accès si votre téléphone le demande.</span></div>
     <form id="form-code" class="flex gap-2">
       <input name="code" required inputmode="numeric" pattern="\\d{8,14}" title="8 à 14 chiffres" placeholder="Ou saisir le code-barres" class="champ">
       <button class="bouton shrink-0">OK</button>
@@ -469,8 +506,10 @@ function modeScan(zone, typeRepas, m) {
     chargerScript("https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js").then(() => {
       const zoneVideo = $("#lecteur", zone);
       if (quitte || fini || lecteur || !zoneVideo) return;
-      // Zone vierge à chaque démarrage (relance après un produit inconnu)
-      zoneVideo.replaceWith(Object.assign(document.createElement("div"), { id: "lecteur", className: zoneVideo.className }));
+      // Zone vierge à chaque démarrage (relance après un produit inconnu ou un échec)
+      const nouvelle = Object.assign(document.createElement("div"), { id: "lecteur", className: CADRE_CAMERA });
+      nouvelle.innerHTML = "<span>📷 Ouverture de la caméra…<br>Autorisez l'accès si votre téléphone le demande.</span>";
+      zoneVideo.replaceWith(nouvelle);
       const F = window.Html5QrcodeSupportedFormats;
       const l = new window.Html5Qrcode("lecteur", {
         formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E], verbose: false,
@@ -478,13 +517,27 @@ function modeScan(zone, typeRepas, m) {
       lecteur = l;
       l.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 260, height: 140 } },
         (texte) => chercher(texte), () => {})
-        .then(() => { if (lecteur !== l) stopperLecteur(l); }) // arrêt demandé pendant le démarrage
-        .catch(() => {
+        .then(() => {
+          if (lecteur !== l) return stopperLecteur(l); // arrêt demandé pendant le démarrage
+          // Vidéo lancée : le cadre d'attente laisse place à l'image de la caméra
+          $("#lecteur", zone)?.querySelector(":scope > span")?.remove();
+        })
+        .catch((erreur) => {
           if (lecteur !== l) return;
           lecteur = null;
-          message("Caméra indisponible : saisissez le code-barres.");
+          echecCamera(motifCamera(erreur));
         });
-    }).catch(() => message("Scanner indisponible : saisissez le code-barres."));
+    }).catch(() => echecCamera("Le scanner n'a pas pu être chargé (connexion ?). Touchez « Réessayer », ou saisissez le code ci-dessous."));
+  };
+
+  // Échec : explication dans le cadre, bouton Réessayer, et la saisie manuelle reste disponible juste en dessous
+  const echecCamera = (texte) => {
+    const cadre = $("#lecteur", zone);
+    if (!cadre || quitte) return;
+    cadre.className = CADRE_CAMERA;
+    cadre.innerHTML = `<span>${esc(texte)}</span><button type="button" class="bouton-sec text-sm" data-reessayer>🔄 Réessayer</button>`;
+    cadre.querySelector("[data-reessayer]").onclick = demarrerCamera;
+    message("Vous pouvez aussi saisir les chiffres sous le code-barres.");
   };
 
   $("#form-code", zone).onsubmit = (e) => {

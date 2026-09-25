@@ -33,7 +33,23 @@ app.include_router(router_coach)
 
 # Frontend (application client sur /app/, espace coach sur /app/coach/), servi sur le même domaine que l'API
 DOSSIER_WEB = Path(__file__).resolve().parent.parent / "web"
-app.mount("/app", StaticFiles(directory=DOSSIER_WEB, html=True), name="web")
+
+
+class FichiersWeb(StaticFiles):
+    """Fichiers du frontend revalidés à chaque visite (Cache-Control: no-cache).
+
+    Sans cet en-tête, le navigateur garde les scripts selon sa propre estimation (parfois des jours) :
+    après un déploiement, les utilisateurs continueraient d'exécuter l'ancienne version. Avec no-cache,
+    un fichier inchangé coûte une simple réponse 304 grâce à l'ETag.
+    """
+
+    async def get_response(self, path, scope):
+        reponse = await super().get_response(path, scope)
+        reponse.headers["Cache-Control"] = "no-cache"
+        return reponse
+
+
+app.mount("/app", FichiersWeb(directory=DOSSIER_WEB, html=True), name="web")
 
 
 @app.exception_handler(APIError)
