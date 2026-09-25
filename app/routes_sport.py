@@ -82,8 +82,9 @@ def valider_seance(
     if not seance:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Séance introuvable.")
     jour = validation.jour or aujourdhui()
-    if jour > aujourdhui():
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Impossible de valider une séance future.")
+    # Tolérance d'un jour : un client à La Réunion ou à Nouméa est déjà « demain » par rapport à Paris
+    if jour > aujourdhui() + timedelta(days=1):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Impossible de valider une séance future.")
 
     realisation = depot.enregistrer_realisation({
         "client_id": client["id"],
