@@ -135,14 +135,35 @@ function ecranSansAcces(e) {
   racine.innerHTML = `
     <div class="min-h-screen flex flex-col items-center justify-center gap-4 p-6 text-center">
       <p class="text-lg max-w-md">${esc(message)}</p>
-      ${lienCoach ? `<a href="coach/" class="text-emerald-400 underline">Vous êtes coach ? Accéder à l'espace coach</a>` : ""}
+      <p id="compte-connecte" class="text-sm text-slate-400 max-w-md"></p>
+      ${lienCoach ? `<a href="coach/" id="lien-coach" class="text-emerald-400 underline">Vous êtes coach ? Accéder à l'espace coach</a>` : ""}
       <div class="flex gap-2">
         ${reessayer ? `<button id="reessayer" class="bouton">Réessayer</button>` : ""}
-        <button id="deco" class="bouton-sec">Se déconnecter</button>
+        <button id="deco" class="bouton-sec">${lienCoach ? "Se connecter avec un autre compte" : "Se déconnecter"}</button>
       </div>
     </div>`;
   $("#reessayer")?.addEventListener("click", () => location.reload());
   $("#deco").onclick = deconnexion;
+  if (lienCoach) preciserCompteConnecte();
+}
+
+/**
+ * Compte sans fiche client : on indique avec quel compte on est connecté. Le cas courant est le coach qui ouvre
+ * l'application client dans le même navigateur (session partagée entre /app/ et /app/coach/).
+ */
+async function preciserCompteConnecte() {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const email = session?.user?.email;
+    if (!email) return;
+    const { data: coach } = await supabase.from("coachs").select("user_id").eq("user_id", session.user.id).maybeSingle();
+    const zone = $("#compte-connecte");
+    if (!zone) return;
+    zone.textContent = coach
+      ? `Vous êtes connecté avec ${email}, le compte coach : il n'a pas d'espace nutrition. Pour voir l'application d'un client, connectez-vous avec son compte (bouton ci-dessous), ou utilisez un autre navigateur ou une fenêtre de navigation privée.`
+      : `Vous êtes connecté avec ${email}.`;
+    if (coach) $("#lien-coach")?.replaceChildren("Aller à l'espace coach");
+  } catch { /* information facultative */ }
 }
 
 /** Échec du chargement d'un onglet (panne passagère, réseau…) : message lisible et bouton Réessayer. */
