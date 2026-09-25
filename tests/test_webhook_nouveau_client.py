@@ -87,3 +87,35 @@ def test_donnees_invalides(client, faux_db, modif):
     )
     assert r.status_code == 422
     assert faux_db.appels == []
+
+
+# --- Champs complets du formulaire d'onboarding -----------------------------
+
+def envoyer(client, donnees):
+    return client.post("/webhooks/nouveau-client", json=donnees, headers={"X-Webhook-Secret": SECRET})
+
+
+def test_formulaire_complet_avec_consentement(client, faux_db):
+    r = envoyer(client, {**PAYLOAD, "target_proteines": 160, "jours_sport": "lundi, Mercredi ;vendredi",
+                         "contraintes_sante": " Genou fragile ", "consentement_sante": True})
+    assert r.status_code == 200
+    assert "Genou" not in r.text  # la donnée de santé n'est jamais renvoyée
+    _, donnees, _ = faux_db.appels[0]
+    assert donnees["jours_sport"] == ["Lundi", "Mercredi", "Vendredi"]
+    assert donnees["contraintes_sante"] == "Genou fragile"
+    assert donnees["target_proteines"] == 160 and "consentement_sante_le" in donnees
+
+
+def test_sante_sans_consentement_refusee(client, faux_db):
+    r = envoyer(client, {**PAYLOAD, "contraintes_sante": "Asthme"})
+    assert r.status_code == 422 and faux_db.appels == []
+
+
+def test_champs_absents_non_ecrases(client, faux_db):
+    envoyer(client, {"nom": "Jean", "email": "jean@exemple.fr"})
+    _, donnees, _ = faux_db.appels[0]
+    assert donnees == {"nom": "Jean", "email": "jean@exemple.fr"}
+
+
+def test_jour_invalide(client, faux_db):
+    assert envoyer(client, {**PAYLOAD, "jours_sport": ["Funday"]}).status_code == 422
