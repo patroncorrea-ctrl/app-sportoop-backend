@@ -39,7 +39,14 @@ Application web/mobile responsive de coaching sportif et nutritionnel personnali
 | `WEBHOOK_SECRET` | Secret partagé envoyé par Make dans le header `X-Webhook-Secret` |
 | `GEMINI_API_KEY` | Clé API Google Gemini |
 
-## Schéma actuel (déjà en production dans Supabase)
+## Base Supabase
+
+- Projet `frhmfyvrcdzohsgdjjwr`, région `eu-west-1` (UE), PostgreSQL 17.
+- Migrations appliquées le 2026-09-25 : `20260925_schema_v2.sql`, `20260925_durcissement_rls.sql`
+  (fonctions RLS `prive.est_coach()` / `prive.mon_client_id()` dans le schéma `prive`, non exposé).
+- Security Advisor : 0 alerte après migration.
+
+## Schéma v1 d'origine (avant les migrations ci-dessus)
 
 ```sql
 CREATE TABLE public.clients (
@@ -102,6 +109,7 @@ CREATE TABLE public.aliments_scannes (
 ## Problèmes connus (issus de l'audit)
 
 Réglés en Phase 1 (branche `feat/securite`) : 1, 3, 10 (dépendance), 11.
+Réglés en Phase 2 (branche `feat/schema-v2`, appliqué en base) : 2, 5, 6, 7, 8, 9 ; 12 partiellement (région UE confirmée, colonne `consentement_sante_le`).
 
 1. Webhook `/webhooks/nouveau-client` **non authentifié** : n'importe qui peut créer des clients.
 2. **RLS désactivé** sur toutes les tables ; `clients` non lié à `auth.users`.
