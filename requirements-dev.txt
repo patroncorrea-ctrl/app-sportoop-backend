@@ -1,2 +1,4 @@
 -r requirements.txt
 pytest==9.1.1
+# Chargement du fichier .env en local (facultatif, voir main.py)
+python-dotenv==1.2.3
