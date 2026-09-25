@@ -92,11 +92,16 @@ CREATE TABLE public.aliments_scannes (
 
 ## Code actuel
 
-`requirements.txt` : fastapi, uvicorn, supabase, google-generativeai, pydantic (versions non épinglées).
-
-`main.py` : endpoint `GET /` (statut) et `POST /webhooks/nouveau-client` (insert nom, email, target_kcal dans `clients`). Le client Supabase est recréé à chaque requête.
+- `main.py` (racine) : point d'entrée Railway, réexporte `app.main:app`.
+- `app/main.py` : `GET /` (statut) et `POST /webhooks/nouveau-client` (protégé par `X-Webhook-Secret`, upsert sur `email`).
+- `app/db.py` : client Supabase unique (`get_supabase`, dépendance FastAPI, surchargeable en test).
+- `app/security.py` : vérification du secret webhook (comparaison à temps constant ; 503 si `WEBHOOK_SECRET` absent).
+- `requirements.txt` épinglé ; `requirements-dev.txt` ajoute pytest/httpx.
+- Tests : `.venv\Scripts\python.exe -m pytest -q` (Supabase simulé, aucun appel réseau).
 
 ## Problèmes connus (issus de l'audit)
+
+Réglés en Phase 1 (branche `feat/securite`) : 1, 3, 10 (dépendance), 11.
 
 1. Webhook `/webhooks/nouveau-client` **non authentifié** : n'importe qui peut créer des clients.
 2. **RLS désactivé** sur toutes les tables ; `clients` non lié à `auth.users`.
