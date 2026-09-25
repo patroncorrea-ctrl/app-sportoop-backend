@@ -5,14 +5,23 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
 
-from app import gemini, openfoodfacts
+from app import gemini, limites, openfoodfacts
 from app.auth import client_courant
-from app.constantes import FUSEAU, TYPES_REPAS, TypeRepas
+from app.constantes import FUSEAU, TYPES_REPAS, Nom, TypeRepas
 from app.depot import DepotNutrition, get_depot
 
 router = APIRouter(tags=["nutrition"])
 
 MACROS = ("proteines", "glucides", "lipides")
+
+# Quantité mangée : 1 g minimum (la colonne NUMERIC(7,1) arrondirait 0,04 g à 0, refusé par son CHECK > 0)
+QUANTITE_MIN_G = 0.1
+QUANTITE_MAX_G = 3000
+# Valeurs maximales d'un aliment enregistré : celles d'une saisie « pour 100 g » au maximum
+# (3000 g à 900 kcal et 100 g de chaque macro pour 100 g). Les macros restent sous la capacité
+# des colonnes NUMERIC(5,1) (9999,9) : un recalcul au prorata qui les dépasserait est refusé (422).
+KCAL_MAX_ALIMENT = 900 * QUANTITE_MAX_G // 100
+MACRO_MAX_ALIMENT = 100 * QUANTITE_MAX_G // 100
 
 
 def aujourdhui() -> date:
@@ -67,10 +76,16 @@ def journal_du_jour(
 # ---------------------------------------------------------------------------
 # Open Food Facts
 # ---------------------------------------------------------------------------
+def quota_produits(client: dict = Depends(client_courant)) -> None:
+    limites.DEBIT_PRODUITS.verifier(str(client["id"]))
+    limites.DEBIT_PRODUITS_GLOBAL.verifier("serveur")  # quota Open Food Facts partagé par tous les clients
+
+
 @router.get("/produits/{code_barres}")
 def produit_par_code_barres(
     code_barres: str = Path(pattern=r"^\d{8,14}$"),
     _client: dict = Depends(client_courant),
+    _quota: None = Depends(quota_produits),
 ):
     """Valeurs nutritionnelles pour 100 g d'un produit (Open Food Facts)."""
     try:
@@ -87,11 +102,11 @@ def produit_par_code_barres(
 class AlimentAjout(BaseModel):
     """Valeurs données pour 100 g (base « 100g », quantite_g obligatoire) ou pour la portion entière."""
 
-    nom_aliment: str = Field(min_length=1, max_length=200)
+    nom_aliment: Nom
     methode_ajout: Literal["scan_barcode", "manuel"] = "manuel"
     code_barres: str | None = Field(default=None, pattern=r"^\d{8,14}$")
     base: Literal["100g", "portion"] = "100g"
-    quantite_g: float | None = Field(default=None, gt=0, le=3000)
+    quantite_g: float | None = Field(default=None, ge=QUANTITE_MIN_G, le=QUANTITE_MAX_G)
     kcal: float = Field(ge=0, le=5000)
     proteines: float = Field(default=0, ge=0, le=1000)
     glucides: float = Field(default=0, ge=0, le=1000)
@@ -112,10 +127,10 @@ class AlimentAjout(BaseModel):
         facteur = self.quantite_g / 100 if self.base == "100g" else 1
         return {
             "repas_id": repas_id,
-            "nom_aliment": self.nom_aliment.strip(),
+            "nom_aliment": self.nom_aliment,
             "methode_ajout": self.methode_ajout,
             "code_barres": self.code_barres,
-            "quantite_g": self.quantite_g,
+            "quantite_g": round(self.quantite_g, 1) if self.quantite_g is not None else None,
             "kcal": round(self.kcal * facteur),
             **{m: round(getattr(self, m) * facteur, 1) for m in MACROS},
             "est_estimation": False,
@@ -137,8 +152,8 @@ def ajouter_aliment(
 class AlimentModif(BaseModel):
     """Correction d'un aliment. Changer seulement quantite_g recalcule les valeurs au prorata."""
 
-    nom_aliment: str | None = Field(default=None, min_length=1, max_length=200)
-    quantite_g: float | None = Field(default=None, gt=0, le=3000)
+    nom_aliment: Nom | None = None
+    quantite_g: float | None = Field(default=None, ge=QUANTITE_MIN_G, le=QUANTITE_MAX_G)
     kcal: float | None = Field(default=None, ge=0, le=5000)
     proteines: float | None = Field(default=None, ge=0, le=1000)
     glucides: float | None = Field(default=None, ge=0, le=1000)
@@ -158,8 +173,10 @@ def modifier_aliment(
 
     champs = modif.model_dump(exclude_none=True)
     if not champs:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Aucune modification fournie.")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Aucune modification fournie.")
 
+    if "quantite_g" in champs:
+        champs["quantite_g"] = round(champs["quantite_g"], 1)
     valeurs_explicites = any(k in champs for k in ("kcal", *MACROS))
     ancienne_qte = actuel.get("quantite_g")
     if "quantite_g" in champs and not valeurs_explicites and ancienne_qte:
@@ -167,14 +184,19 @@ def modifier_aliment(
         champs["kcal"] = round((actuel.get("kcal") or 0) * ratio)
         for m in MACROS:
             champs[m] = round(float(actuel.get(m) or 0) * ratio, 1)
+        # Les valeurs recalculées ne passent pas par la validation du modèle : bornes contrôlées ici
+        if champs["kcal"] > KCAL_MAX_ALIMENT or any(champs[m] > MACRO_MAX_ALIMENT for m in MACROS):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Quantité trop élevée pour les valeurs actuelles de cet aliment : "
+                "corrigez aussi les kcal et les macros.",
+            )
     else:
         if "kcal" in champs:
             champs["kcal"] = round(champs["kcal"])
         for m in MACROS:
             if m in champs:
                 champs[m] = round(champs[m], 1)
-    if "nom_aliment" in champs:
-        champs["nom_aliment"] = champs["nom_aliment"].strip()
 
     champs["est_estimation"] = False  # une valeur corrigée par le client n'est plus une estimation
     return depot.modifier_aliment(str(aliment_id), champs)
@@ -206,6 +228,10 @@ def estimateur_disponible():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "L'estimation par photo n'est pas activée.")
 
 
+def quota_photo(client: dict = Depends(client_courant)) -> None:
+    limites.DEBIT_PHOTO.verifier(str(client["id"]))  # chaque estimation est facturée par Gemini
+
+
 @router.post("/journal/{jour}/{type_repas}/photo", status_code=status.HTTP_201_CREATED)
 def ajouter_par_photo(
     jour: date,
@@ -214,6 +240,7 @@ def ajouter_par_photo(
     client: dict = Depends(client_courant),
     depot: DepotNutrition = Depends(get_depot),
     estimateur=Depends(estimateur_disponible),
+    _quota: None = Depends(quota_photo),
 ):
     """Ajoute les aliments estimés par l'IA, marqués « est_estimation » : à vérifier et corriger par le client.
 
@@ -223,31 +250,33 @@ def ajouter_par_photo(
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Format d'image non pris en charge.")
     image = photo.file.read(TAILLE_MAX_IMAGE + 1)
     if len(image) > TAILLE_MAX_IMAGE:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Image trop lourde (8 Mo maximum).")
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Image trop lourde (8 Mo maximum).")
     if not image:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Image vide.")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Image vide.")
 
     try:
         estimes = estimateur.estimer(image, photo.content_type)
     except gemini.EstimationImpossible as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
     if not estimes:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Aucun aliment reconnu sur la photo.")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Aucun aliment reconnu sur la photo.")
 
     repas_id = depot.obtenir_ou_creer_repas(client["id"], jour, type_repas)
-    aliments = [
-        depot.ajouter_aliment({
+    # Lignes déjà validées par le modèle AlimentEstime, puis insertion groupée : pas d'enregistrement partiel.
+    # Quantité ramenée à 1 g minimum, comme pour une saisie manuelle.
+    aliments = depot.ajouter_aliments([
+        {
             "repas_id": repas_id,
-            "nom_aliment": a["nom_aliment"].strip(),
+            "nom_aliment": a["nom_aliment"],
             "methode_ajout": "photo_ia",
             "code_barres": None,
-            "quantite_g": round(a["quantite_g"], 1),
+            "quantite_g": max(float(QUANTITE_MIN_G), round(a["quantite_g"], 1)),
             "kcal": round(a["kcal"]),
             **{m: round(a[m], 1) for m in MACROS},
             "est_estimation": True,
-        })
+        }
         for a in estimes
-    ]
+    ])
     return {
         "avertissement": "Estimation automatique : vérifiez et corrigez les quantités et les valeurs.",
         "aliments": aliments,
