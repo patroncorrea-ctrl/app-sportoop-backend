@@ -1,0 +1,32 @@
+/* Composants communs (Tailwind CDN chargé dans chaque page) */
+.champ {
+  width: 100%;
+  background: rgb(15 23 42);
+  border: 1px solid rgb(51 65 85);
+  border-radius: 0.75rem;
+  padding: 0.65rem 0.9rem;
+  color: white;
+  outline: none;
+}
+.champ:focus { border-color: rgb(52 211 153); }
+.bouton {
+  background: rgb(16 185 129);
+  color: rgb(2 6 23);
+  font-weight: 600;
+  border-radius: 0.75rem;
+  padding: 0.65rem 1rem;
+  transition: background 0.15s;
+}
+.bouton:hover { background: rgb(52 211 153); }
+.bouton:disabled { opacity: 0.5; cursor: wait; }
+.bouton-sec {
+  background: rgb(30 41 59);
+  color: white;
+  border-radius: 0.75rem;
+  padding: 0.55rem 0.9rem;
+  border: 1px solid rgb(51 65 85);
+}
+.bouton-sec:hover { background: rgb(51 65 85); }
+.carte { background: rgb(15 23 42); border: 1px solid rgb(30 41 59); border-radius: 1rem; }
+.pastille-estimation { background: rgb(120 53 15); color: rgb(253 230 138); font-size: 0.7rem; padding: 0.1rem 0.45rem; border-radius: 999px; }
+body { -webkit-tap-highlight-color: transparent; }
