@@ -1,7 +1,8 @@
 // Application client : nutrition (8 blocs repas) et sport (programme de la semaine).
 import {
-  $, api, dateLisible, decalerJours, ecranConnexion, ecranNouveauMotDePasse, esc, isoLocal,
-  modale, sessionCourante, supabase, toast, TYPE_LIEN,
+  $, api, aujourdhuiLocal, aujourdhuiServeur, dateLisible, decalerJours, ecranConnexion, ecranNouveauMotDePasse,
+  ERREUR_LIEN, esc, etatSession, modale, motDePasseADefinir, oublierMotDePasseADefinir, quandNonAuthentifie,
+  sessionCourante, supabase, toast,
 } from "./commun.js";
 
 const LIBELLES_REPAS = {
@@ -11,27 +12,92 @@ const LIBELLES_REPAS = {
 };
 const MACROS = [["proteines", "Protéines", "bg-sky-500"], ["glucides", "Glucides", "bg-amber-500"], ["lipides", "Lipides", "bg-rose-500"]];
 
-const etat = { onglet: "nutrition", jour: isoLocal(new Date()), semaine: isoLocal(new Date()), boutons: [] };
+// « Aujourd'hui » = journée locale du client : le journal alimentaire suit son fuseau (le serveur n'impose
+// aucune date pour la nutrition). La date de Paris ne sert qu'à prévoir le contrôle « séance future ».
+const etat = {
+  onglet: "nutrition", jour: aujourdhuiLocal(), semaine: aujourdhuiLocal(),
+  aujourdhui: aujourdhuiLocal(), jourServeur: aujourdhuiServeur(), boutons: [],
+};
 const racine = $("#app");
 
 // ---------------------------------------------------------------------------
 // Démarrage
 // ---------------------------------------------------------------------------
 async function demarrer() {
-  if ((TYPE_LIEN === "invite" || TYPE_LIEN === "recovery") && (await attendreSession())) {
-    await ecranNouveauMotDePasse(racine);
-    toast("Mot de passe enregistré.", "ok");
+  // Après une invitation / réinitialisation, le mot de passe doit être choisi avant tout accès,
+  // y compris si la page a été rechargée ou rouverte entre-temps (marqueur conservé jusqu'au succès).
+  if (motDePasseADefinir()) {
+    if (await attendreSession()) {
+      await ecranNouveauMotDePasse(racine);
+      toast("Mot de passe enregistré.", "ok");
+    } else {
+      oublierMotDePasseADefinir(); // plus de session : la connexion normale reprend la main
+    }
   }
-  if (!(await sessionCourante())) await ecranConnexion(racine, "ADRM Sportoop");
-  try {
-    await api("/journal");
-  } catch (e) {
-    return ecranSansAcces(e);
+  if (ERREUR_LIEN && (await sessionCourante())) {
+    toast(ERREUR_LIEN, "erreur"); // lien périmé ouvert alors qu'une session existe déjà
+    history.replaceState(null, "", location.pathname);
   }
+  let message = "";
+  for (let essai = 0; ; essai++) {
+    // Supabase injoignable pendant le rafraîchissement du jeton : la session est conservée, pas d'écran de
+    // connexion ; api() répondra « service momentanément indisponible » avec un bouton Réessayer.
+    const { session, indisponible } = await etatSession();
+    if (!session && !indisponible) await ecranConnexion(racine, "ADRM Sportoop", { message });
+    try {
+      await api("/journal");
+      break;
+    } catch (e) {
+      // 401 : refus CONFIRMÉ par Supabase (session révoquée, déconnexion sur un autre appareil…), voir api().
+      // Une panne passagère arrive ici en 503 et garde la session. On oublie la session locale et on
+      // redemande une connexion, une seule fois.
+      if (e.status === 401 && essai === 0) {
+        await supabase.auth.signOut({ scope: "local" }).catch(() => {});
+        message = "Votre session a expiré : reconnectez-vous.";
+        continue;
+      }
+      return ecranSansAcces(e);
+    }
+  }
+  quandNonAuthentifie(sessionExpiree);
   etat.boutons = await api("/boutons").catch(() => []);
   structure();
   afficher();
+  surveillerChangementDeJour();
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+
+// Session refusée en cours d'utilisation, refus confirmé par Supabase (voir api()) : retour à l'écran de
+// connexion. Une indisponibilité passagère n'appelle pas cette fonction : l'appel échoue avec un message.
+let sessionPerdue = false;
+async function sessionExpiree() {
+  if (sessionPerdue) return;
+  sessionPerdue = true;
+  await supabase.auth.signOut({ scope: "local" }).catch(() => {});
+  location.reload();
+}
+
+// L'application peut rester ouverte d'un jour sur l'autre (PWA en arrière-plan) : au retour au premier
+// plan et au passage de minuit (heure locale), « aujourd'hui » est recalculé pour ne pas écrire dans le
+// journal de la veille. Le passage de minuit à Paris ne fait que rafraîchir les boutons de validation.
+function surveillerChangementDeJour() {
+  const verifier = () => {
+    const nouveau = aujourdhuiLocal(), serveur = aujourdhuiServeur();
+    const changementLocal = nouveau !== etat.aujourdhui, changementServeur = serveur !== etat.jourServeur;
+    if (!changementLocal && !changementServeur) return;
+    etat.jourServeur = serveur;
+    if (changementLocal) {
+      const ancien = etat.aujourdhui;
+      etat.aujourdhui = nouveau;
+      if (etat.jour === ancien) etat.jour = nouveau; // l'utilisateur regardait « aujourd'hui » : on le suit
+      if (etat.semaine === ancien) etat.semaine = nouveau;
+    }
+    if (changementLocal || etat.onglet === "sport") afficher();
+  };
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") verifier(); });
+  addEventListener("pageshow", verifier);
+  addEventListener("focus", verifier);
+  setInterval(verifier, 60 * 1000);
 }
 
 // supabase-js lit le jeton du lien de manière asynchrone
@@ -43,19 +109,56 @@ async function attendreSession() {
   return false;
 }
 
+const sansAccents = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+/** Écran affiché quand l'API refuse l'accès : abonnement en attente ou résilié, compte non rattaché, panne. */
 function ecranSansAcces(e) {
-  const message = e.status === 403 ? e.message : "Le service est momentanément indisponible.";
+  // Seul un abonnement ACTIF donne accès (403 sinon) ; le motif est lu dans le code ou le message de l'API
+  const motif = sansAccents(`${e.code || ""} ${e.message || ""}`);
+  let message, lienCoach = false, reessayer = true;
+  if (e.status === 403 && motif.includes("attente")) {
+    message = "Votre inscription est bien enregistrée, mais votre accès n'est pas encore activé : il s'ouvrira dès que votre abonnement sera actif. Si vous avez déjà réglé votre abonnement, contactez votre coach.";
+  } else if (e.status === 403 && motif.includes("resili")) {
+    message = "Votre abonnement est résilié : l'accès à l'application est suspendu. Contactez votre coach pour le réactiver.";
+  } else if (e.status === 403 && motif.includes("abonnement")) {
+    message = "Votre abonnement n'est pas actif : l'accès à l'application est suspendu. Contactez votre coach.";
+  } else if (e.status === 403) {
+    message = motif.includes("aucune fiche") ? "Ce compte n'est rattaché à aucune fiche client." : e.message;
+    lienCoach = true;
+    reessayer = false;
+  } else if (e.status === 401) {
+    message = "Votre session n'est plus valide : déconnectez-vous puis reconnectez-vous.";
+    reessayer = false;
+  } else {
+    message = "Le service est momentanément indisponible. Réessayez dans quelques instants.";
+  }
   racine.innerHTML = `
     <div class="min-h-screen flex flex-col items-center justify-center gap-4 p-6 text-center">
-      <p class="text-lg">${esc(message)}</p>
-      ${e.status === 403 ? `<a href="coach/" class="text-emerald-400 underline">Vous êtes coach ? Accéder à l'espace coach</a>` : ""}
-      <button id="deco" class="bouton-sec">Se déconnecter</button>
+      <p class="text-lg max-w-md">${esc(message)}</p>
+      ${lienCoach ? `<a href="coach/" class="text-emerald-400 underline">Vous êtes coach ? Accéder à l'espace coach</a>` : ""}
+      <div class="flex gap-2">
+        ${reessayer ? `<button id="reessayer" class="bouton">Réessayer</button>` : ""}
+        <button id="deco" class="bouton-sec">Se déconnecter</button>
+      </div>
     </div>`;
+  $("#reessayer")?.addEventListener("click", () => location.reload());
   $("#deco").onclick = deconnexion;
 }
 
+/** Échec du chargement d'un onglet (panne passagère, réseau…) : message lisible et bouton Réessayer. */
+function erreurVue(vue, e, recharger) {
+  const message = e.status ? e.message : "Connexion impossible : vérifiez votre réseau puis réessayez.";
+  vue.innerHTML = `
+    <div class="text-center space-y-3 py-6">
+      <p class="text-red-400">${esc(message)}</p>
+      <button id="reessayer-vue" class="bouton-sec">Réessayer</button>
+    </div>`;
+  $("#reessayer-vue", vue).onclick = recharger;
+}
+
 async function deconnexion() {
-  await supabase.auth.signOut();
+  oublierMotDePasseADefinir();
+  await supabase.auth.signOut().catch(() => {});
   location.reload();
 }
 
@@ -110,6 +213,7 @@ function urlSure(url) {
   try { return ["http:", "https:"].includes(new URL(url).protocol) ? url : null; } catch { return null; }
 }
 
+/** Action d'un bouton du coach : appelée directement dans le clic (geste utilisateur), window.open est autorisé. */
 function executerAction(type, cible) {
   if (type === "ECRAN") {
     const ecran = String(cible).toLowerCase();
@@ -118,6 +222,23 @@ function executerAction(type, cible) {
   }
   const url = urlSure(cible);
   if (url) window.open(url, "_blank", "noopener");
+}
+
+/**
+ * Redirection prévue par le coach après la validation d'une séance. Elle arrive après l'appel à l'API,
+ * donc hors du geste de l'utilisateur : Safari (iOS, macOS) bloque alors window.open sans rien signaler.
+ * Pour un lien ou une vidéo, on propose donc un vrai lien que le client touche lui-même.
+ */
+function proposerRedirection(type, cible) {
+  if (type === "ECRAN") return executerAction(type, cible);
+  const url = urlSure(cible);
+  if (!url) return;
+  const m = modale("Votre coach vous propose la suite", `
+    <a href="${esc(url)}" target="_blank" rel="noopener" class="bouton w-full block text-center">
+      ${type === "VIDEO" ? "▶️ Voir la vidéo" : "🔗 Ouvrir le lien"}</a>
+    <p class="text-xs text-slate-400 text-center mt-2 break-all">${esc(new URL(url).hostname)}</p>`);
+  // Fermeture différée : le lien doit d'abord suivre son action par défaut (ouverture de l'onglet)
+  $("a", m.corps).addEventListener("click", () => setTimeout(m.fermer, 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -130,8 +251,8 @@ async function vueNutrition() {
   try {
     j = await api(`/journal?date=${etat.jour}`);
   } catch (e) {
-    vue.innerHTML = `<p class="text-red-400">${esc(e.message)}</p>`;
-    return;
+    if (e.status === 403) return ecranSansAcces(e); // abonnement devenu inactif en cours d'utilisation
+    return erreurVue(vue, e, vueNutrition);
   }
   if (etat.onglet !== "nutrition") return;
 
@@ -142,7 +263,7 @@ async function vueNutrition() {
       <button id="veille" class="bouton-sec" aria-label="Jour précédent">‹</button>
       <div class="text-center">
         <div class="font-semibold capitalize">${esc(dateLisible(j.date))}</div>
-        ${j.date !== isoLocal(new Date()) ? `<button id="auj" class="text-xs text-emerald-400">Revenir à aujourd'hui</button>` : ""}
+        ${j.date !== aujourdhuiLocal() ? `<button id="auj" class="text-xs text-emerald-400">Revenir à aujourd'hui</button>` : ""}
       </div>
       <button id="lendemain" class="bouton-sec" aria-label="Jour suivant">›</button>
     </div>
@@ -176,7 +297,7 @@ async function vueNutrition() {
 
   $("#veille").onclick = () => { etat.jour = decalerJours(etat.jour, -1); vueNutrition(); };
   $("#lendemain").onclick = () => { etat.jour = decalerJours(etat.jour, 1); vueNutrition(); };
-  $("#auj")?.addEventListener("click", () => { etat.jour = isoLocal(new Date()); vueNutrition(); });
+  $("#auj")?.addEventListener("click", () => { etat.jour = aujourdhuiLocal(); vueNutrition(); });
   vue.querySelectorAll("[data-ajouter]").forEach((b) => (b.onclick = () => modaleAjout(b.dataset.ajouter)));
   const aliments = Object.fromEntries(j.repas.flatMap((r) => r.aliments).map((a) => [a.id, a]));
   vue.querySelectorAll("[data-aliment]").forEach((b) => (b.onclick = () => modaleEdition(aliments[b.dataset.aliment])));
@@ -222,9 +343,13 @@ function modaleAjout(typeRepas) {
     <div id="mode"></div>`);
   const zone = $("#mode", m.corps);
   let arreterScan = null;
-  const choisir = (mode) => {
-    arreterScan?.();
+  const quitterScan = () => {
+    const arreter = arreterScan;
     arreterScan = null;
+    try { arreter?.(); } catch { /* l'arrêt de la caméra ne doit jamais bloquer le changement de mode */ }
+  };
+  const choisir = (mode) => {
+    quitterScan();
     m.corps.querySelectorAll("[data-mode]").forEach((b) => b.classList.toggle("!border-emerald-500", b.dataset.mode === mode));
     if (mode === "manuel") formulaireAliment(zone, typeRepas, m, {});
     if (mode === "scan") arreterScan = modeScan(zone, typeRepas, m);
@@ -233,7 +358,8 @@ function modaleAjout(typeRepas) {
   m.corps.querySelectorAll("[data-mode]").forEach((b) => (b.onclick = () => choisir(b.dataset.mode)));
   // Couper la caméra quelle que soit la façon dont la fenêtre se ferme
   new MutationObserver((_, obs) => {
-    if (!m.el.isConnected) { arreterScan?.(); obs.disconnect(); }
+    if (m.el.isConnected) return;
+    try { quitterScan(); } finally { obs.disconnect(); }
   }).observe(document.body, { childList: true });
   choisir("manuel");
 }
@@ -251,7 +377,7 @@ function formulaireAliment(zone, typeRepas, m, produit) {
             <option value="100g">pour 100 g</option>
             <option value="portion" ${produit.code_barres ? "disabled" : ""}>pour la portion</option>
           </select></label>
-        <label class="text-sm" id="bloc-qte">Quantité mangée (g)<input name="quantite_g" type="number" step="1" min="1" max="3000" class="champ mt-1"></label>
+        <label class="text-sm" id="bloc-qte">Quantité mangée (g)<input name="quantite_g" type="number" inputmode="decimal" step="any" min="0.1" max="3000" class="champ mt-1"></label>
       </div>
       ${champsValeurs()}
       <button class="bouton w-full">Ajouter</button>
@@ -286,43 +412,92 @@ function formulaireAliment(zone, typeRepas, m, produit) {
   };
 }
 
+// États de html5-qrcode (Html5QrcodeScannerState) : seul un lecteur en cours ou en pause peut être arrêté
+const LECTEUR_EN_COURS = 2, LECTEUR_EN_PAUSE = 3;
+
+/** Arrêt tolérant : dans html5-qrcode, stop() lève une exception SYNCHRONE si la caméra n'a pas démarré. */
+function stopperLecteur(l) {
+  try {
+    const etatLecteur = l.getState();
+    if (etatLecteur === LECTEUR_EN_COURS || etatLecteur === LECTEUR_EN_PAUSE) l.stop().catch(() => {});
+  } catch { /* déjà arrêté ou jamais démarré */ }
+}
+
+/** Mode code-barres ; renvoie la fonction qui coupe la caméra (changement de mode, fermeture). */
 function modeScan(zone, typeRepas, m) {
   zone.innerHTML = `
     <div id="lecteur" class="rounded-xl overflow-hidden bg-black mb-3"></div>
     <form id="form-code" class="flex gap-2">
-      <input name="code" inputmode="numeric" pattern="\\d{8,14}" placeholder="Ou saisir le code-barres" class="champ">
+      <input name="code" required inputmode="numeric" pattern="\\d{8,14}" title="8 à 14 chiffres" placeholder="Ou saisir le code-barres" class="champ">
       <button class="bouton shrink-0">OK</button>
     </form>
-    <p id="msg-scan" class="text-sm text-slate-400 mt-2">Visez le code-barres du produit.</p>`;
-  let lecteur = null, fini = false;
+    <p id="msg-scan" class="text-sm text-slate-400 mt-2">Visez le code-barres du produit.</p>
+    <button type="button" id="relancer-scan" class="hidden mt-2 text-sm text-emerald-400 hover:text-emerald-300">📷 Scanner un autre produit</button>`;
+  const message = (texte) => { const el = $("#msg-scan", zone); if (el) el.textContent = texte; };
+  const boutonRelancer = (visible) => $("#relancer-scan", zone)?.classList.toggle("hidden", !visible);
+  let lecteur = null;   // lecteur actif ou en cours de démarrage (null = caméra coupée)
+  let fini = false;     // recherche en cours
+  let quitte = false;   // mode abandonné (autre mode choisi ou fenêtre fermée)
+
+  const arreter = () => {
+    const l = lecteur;
+    lecteur = null;
+    // Pendant la demande d'autorisation, l'arrêt est impossible : il est fait à la fin du démarrage (voir .then)
+    if (l) stopperLecteur(l);
+  };
+
   const chercher = async (code) => {
-    if (fini) return;
+    if (fini || quitte) return;
     fini = true;
     arreter();
-    $("#msg-scan", zone).textContent = "Recherche du produit…";
+    boutonRelancer(false);
+    message("Recherche du produit…");
     try {
       const produit = await api(`/produits/${encodeURIComponent(code)}`);
-      formulaireAliment(zone, typeRepas, m, produit);
+      if (!quitte) formulaireAliment(zone, typeRepas, m, produit);
     } catch (e) {
       fini = false;
-      $("#msg-scan", zone).textContent = e.status === 404
-        ? "Produit inconnu d'Open Food Facts : utilisez l'ajout manuel." : e.message;
+      if (quitte) return;
+      message(e.status === 404 ? "Produit inconnu d'Open Food Facts : utilisez l'ajout manuel." : e.message);
+      boutonRelancer(true);
     }
   };
-  const arreter = () => { if (lecteur) { lecteur.stop().catch(() => {}); lecteur = null; } };
-  $("#form-code", zone).onsubmit = (e) => { e.preventDefault(); chercher(e.target.code.value.trim()); };
 
-  chargerScript("https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js").then(() => {
-    if (fini || !$("#lecteur", zone)) return;
-    const F = window.Html5QrcodeSupportedFormats;
-    lecteur = new window.Html5Qrcode("lecteur", {
-      formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E], verbose: false,
-    });
-    lecteur.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 260, height: 140 } },
-      (texte) => chercher(texte), () => {})
-      .catch(() => { $("#msg-scan", zone).textContent = "Caméra indisponible : saisissez le code-barres."; });
-  }).catch(() => { $("#msg-scan", zone).textContent = "Scanner indisponible : saisissez le code-barres."; });
-  return arreter;
+  const demarrerCamera = () => {
+    if (quitte || fini || lecteur) return;
+    message("Visez le code-barres du produit.");
+    chargerScript("https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js").then(() => {
+      const zoneVideo = $("#lecteur", zone);
+      if (quitte || fini || lecteur || !zoneVideo) return;
+      // Zone vierge à chaque démarrage (relance après un produit inconnu)
+      zoneVideo.replaceWith(Object.assign(document.createElement("div"), { id: "lecteur", className: zoneVideo.className }));
+      const F = window.Html5QrcodeSupportedFormats;
+      const l = new window.Html5Qrcode("lecteur", {
+        formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E], verbose: false,
+      });
+      lecteur = l;
+      l.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 260, height: 140 } },
+        (texte) => chercher(texte), () => {})
+        .then(() => { if (lecteur !== l) stopperLecteur(l); }) // arrêt demandé pendant le démarrage
+        .catch(() => {
+          if (lecteur !== l) return;
+          lecteur = null;
+          message("Caméra indisponible : saisissez le code-barres.");
+        });
+    }).catch(() => message("Scanner indisponible : saisissez le code-barres."));
+  };
+
+  $("#form-code", zone).onsubmit = (e) => {
+    e.preventDefault();
+    const code = e.target.code.value.trim();
+    // Code vide ou mal formé : on ne coupe pas la caméra
+    if (!/^\d{8,14}$/.test(code)) return message("Le code-barres doit comporter 8 à 14 chiffres.");
+    chercher(code);
+  };
+  $("#relancer-scan", zone).onclick = () => { boutonRelancer(false); demarrerCamera(); };
+
+  demarrerCamera();
+  return () => { quitte = true; arreter(); };
 }
 
 const scriptsCharges = {};
@@ -335,15 +510,25 @@ function chargerScript(src) {
 }
 
 function modePhoto(zone, typeRepas, m) {
+  // Deux boutons : « capture » ouvre directement l'appareil photo sur mobile (sans accès à la galerie),
+  // le second passe par le sélecteur du système pour choisir une photo déjà prise.
   zone.innerHTML = `
-    <p class="text-sm text-slate-400 mb-3">Prenez votre assiette en photo : l'IA estime les aliments et les quantités.
+    <p class="text-sm text-slate-400 mb-3">Photographiez votre assiette : l'IA estime les aliments et les quantités.
       Il s'agit d'une <strong>estimation</strong> à vérifier et corriger ensuite. La photo n'est pas conservée.</p>
-    <label class="bouton w-full block text-center cursor-pointer">📸 Prendre ou choisir une photo
-      <input type="file" accept="image/*" capture="environment" class="hidden" id="photo"></label>
+    <div class="grid grid-cols-2 gap-2">
+      <label class="bouton block text-center cursor-pointer">📸 Prendre une photo
+        <input type="file" accept="image/*" capture="environment" class="hidden" data-photo></label>
+      <label class="bouton-sec block text-center cursor-pointer">🖼️ Choisir une photo
+        <input type="file" accept="image/*" class="hidden" data-photo></label>
+    </div>
     <p id="msg-photo" class="text-sm mt-3"></p>`;
-  $("#photo", zone).onchange = async (e) => {
-    const fichier = e.target.files[0];
-    if (!fichier) return;
+  let enCours = false;
+  const analyser = async (e) => {
+    const champ = e.target;
+    const fichier = champ.files[0];
+    champ.value = ""; // permet de reprendre la même photo après une erreur
+    if (!fichier || enCours) return;
+    enCours = true;
     const msg = $("#msg-photo", zone);
     msg.className = "text-sm mt-3 text-slate-300";
     msg.textContent = "Analyse en cours…";
@@ -357,8 +542,11 @@ function modePhoto(zone, typeRepas, m) {
     } catch (err) {
       msg.className = "text-sm mt-3 text-red-400";
       msg.textContent = err.status === 503 ? "L'estimation par photo n'est pas encore activée par votre coach." : err.message;
+    } finally {
+      enCours = false;
     }
   };
+  zone.querySelectorAll("[data-photo]").forEach((champ) => (champ.onchange = analyser));
 }
 
 /** Réduit la photo (1600 px max, JPEG) pour un envoi rapide. */
@@ -380,7 +568,7 @@ function modaleEdition(a) {
     <form id="form-edit" class="space-y-3">
       <input name="nom_aliment" required maxlength="200" class="champ" value="${esc(a.nom_aliment)}">
       <label class="text-sm block">Quantité (g)
-        <input name="quantite_g" type="number" step="1" min="1" max="3000" class="champ mt-1" value="${a.quantite_g ?? ""}"></label>
+        <input name="quantite_g" type="number" inputmode="decimal" step="any" min="0.1" max="3000" class="champ mt-1" value="${esc(a.quantite_g ?? "")}"></label>
       <p class="text-xs text-slate-400">Si vous ne changez que la quantité, les valeurs sont recalculées automatiquement.</p>
       ${champsValeurs()}
       <div class="flex gap-2">
@@ -427,11 +615,14 @@ async function vueSport() {
   try {
     s = await api(`/seances/semaine?date=${etat.semaine}`);
   } catch (e) {
-    vue.innerHTML = `<p class="text-red-400">${esc(e.message)}</p>`;
-    return;
+    if (e.status === 403) return ecranSansAcces(e); // abonnement devenu inactif en cours d'utilisation
+    return erreurVue(vue, e, vueSport);
   }
   if (etat.onglet !== "sport") return;
-  const aujourdhui = isoLocal(new Date());
+  // Mise en évidence et validation : journée locale du client
+  const jourMeme = aujourdhuiLocal();
+  // L'API accepte jusqu'à un jour d'avance sur Paris : la date locale suffit (outre-mer compris)
+  const limiteValidation = jourMeme;
   const court = (iso) => new Date(iso + "T12:00:00").toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
 
   vue.innerHTML = `
@@ -442,9 +633,9 @@ async function vueSport() {
     </div>
     <div class="space-y-3">
       ${s.jours.map((j) => `
-        <section class="carte p-4 ${j.date === aujourdhui ? "!border-emerald-600" : ""}">
+        <section class="carte p-4 ${j.date === jourMeme ? "!border-emerald-600" : ""}">
           <h3 class="font-semibold mb-2">${j.jour_semaine} <span class="text-sm text-slate-400 font-normal">${court(j.date)}</span></h3>
-          ${j.seances.length ? j.seances.map((se) => carteSeance(se, j.date, aujourdhui)).join("")
+          ${j.seances.length ? j.seances.map((se) => carteSeance(se, j.date, limiteValidation, jourMeme)).join("")
             : `<p class="text-sm text-slate-500">Repos</p>`}
         </section>`).join("")}
     </div>`;
@@ -457,13 +648,16 @@ async function vueSport() {
   }));
 }
 
-function carteSeance(se, date, aujourdhui) {
+function carteSeance(se, date, limiteValidation, jourMeme) {
   const r = se.realisation;
   const badge = r ? (r.statut === "FAIT"
     ? `<span class="text-xs bg-emerald-900 text-emerald-300 rounded-full px-2 py-0.5">✓ Faite</span>`
     : `<span class="text-xs bg-slate-800 text-slate-300 rounded-full px-2 py-0.5">Manquée</span>`) : "";
   const video = urlSure(se.video_url);
-  const validable = date <= aujourdhui;
+  const validable = date <= limiteValidation;
+  // En avance sur Paris (La Réunion, Nouvelle-Calédonie…) : la séance du jour local n'est validable
+  // qu'une fois minuit passé à Paris ; on l'explique plutôt que de laisser un vide.
+  const bientot = !validable && date === jourMeme;
   return `
     <div class="border-t border-slate-800 first:border-0 pt-3 first:pt-0 mt-3 first:mt-0">
       <div class="flex items-start justify-between gap-2">
@@ -479,6 +673,7 @@ function carteSeance(se, date, aujourdhui) {
           <button data-valider="${se.id}|${date}#FAIT" class="bouton text-sm">${r?.statut === "FAIT" ? "Modifier" : "J'ai fait ma séance"}</button>
           ${r?.statut !== "MANQUE" ? `<button data-valider="${se.id}|${date}#MANQUE" class="bouton-sec text-sm">Manquée</button>` : ""}` : ""}
       </div>
+      ${bientot ? `<p class="text-xs text-slate-500 mt-2">Validation possible dès minuit, heure de Paris.</p>` : ""}
     </div>`;
 }
 
@@ -495,12 +690,16 @@ function modaleValidation(seance, date, statut) {
             </label>`).join("")}
           </div>
         </div>` : ""}
-      <textarea name="commentaire" maxlength="1000" rows="3" placeholder="Un commentaire pour votre coach ? (facultatif)" class="champ"></textarea>
+      <textarea name="commentaire" maxlength="1000" rows="3" placeholder="Un commentaire pour votre coach ? (facultatif)" class="champ">${esc(seance.realisation?.commentaire || "")}</textarea>
       <button class="bouton w-full">Valider</button>
     </form>`);
+  // Le commentaire déjà envoyé est pré-rempli : l'enregistrement remplace la réalisation entière,
+  // un champ laissé vide effacerait la remarque transmise au coach.
   const f = $("#form-valid", m.corps);
   f.onsubmit = async (e) => {
     e.preventDefault();
+    const bouton = f.querySelector("button");
+    bouton.disabled = true;
     try {
       const r = await api(`/seances/${seance.id}/validation`, {
         methode: "POST",
@@ -508,9 +707,12 @@ function modaleValidation(seance, date, statut) {
       });
       m.fermer();
       toast(statut === "FAIT" ? "Séance validée 💪" : "C'est noté.", "ok");
-      if (r.redirection) executerAction(r.redirection.cible_type, r.redirection.cible);
+      if (r.redirection) proposerRedirection(r.redirection.cible_type, r.redirection.cible);
       if (etat.onglet === "sport") vueSport();
-    } catch (err) { toast(err.message, "erreur"); }
+    } catch (err) {
+      toast(err.message, "erreur");
+      bouton.disabled = false;
+    }
   };
 }
 
