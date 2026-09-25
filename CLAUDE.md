@@ -27,7 +27,7 @@ Application web/mobile responsive de coaching sportif et nutritionnel personnali
 - Frontend : HTML5 + Tailwind CSS (dark mode natif), futur PWA / Capacitor. Maquettes client et coach déjà réalisées.
 - Backend : Python FastAPI, hébergé sur Railway. Démarrage : `uvicorn main:app --host 0.0.0.0 --port $PORT`
 - Dépôt : `patroncorrea-ctrl/app-sportoop`
-- Base : Supabase (PostgreSQL), région UE à confirmer.
+- Base : Supabase (PostgreSQL), région UE (`eu-west-1`).
 - Services : Make.com (webhooks), Open Food Facts (gratuit), Google Gemini (vision), Systeme.io (ventes, abonnements, mails).
 
 ## Variables d'environnement
@@ -37,12 +37,15 @@ Application web/mobile responsive de coaching sportif et nutritionnel personnali
 | `SUPABASE_URL` | URL du projet Supabase |
 | `SUPABASE_KEY` | Clé **service_role** (backend uniquement, jamais côté frontend) |
 | `WEBHOOK_SECRET` | Secret partagé envoyé par Make dans le header `X-Webhook-Secret` |
-| `GEMINI_API_KEY` | Clé API Google Gemini |
+| `GEMINI_API_KEY` | Clé API Google Gemini (niveau **payant** : le gratuit peut réutiliser les photos) |
+| `GEMINI_MODEL` | Modèle Gemini (défaut `gemini-3.8-flash`) |
+| `PHOTO_IA_ACTIVE` | `true` pour activer l'estimation par photo (après mise à jour de la politique de confidentialité) |
+| `SYSTEMEIO_WEBHOOK_SECRET` | Secret du webhook Systeme.io (signature HMAC-SHA256, header `X-Webhook-Signature`) |
 
 ## Base Supabase
 
 - Projet `frhmfyvrcdzohsgdjjwr`, région `eu-west-1` (UE), PostgreSQL 17.
-- Migrations appliquées le 2026-09-25 : `20260925_schema_v2.sql`, `20260925_durcissement_rls.sql`
+- Migrations appliquées le 2026-09-25 : `20260925_schema_v2.sql`, `20260925_durcissement_rls.sql`, `20260925_abonnement_systemeio.sql`
   (fonctions RLS `prive.est_coach()` / `prive.mon_client_id()` dans le schéma `prive`, non exposé).
 - Security Advisor : 0 alerte après migration.
 
@@ -108,6 +111,12 @@ CREATE TABLE public.aliments_scannes (
 - `app/routes_nutrition.py` : `GET /journal?date=` (8 blocs, totaux, restant), `GET /produits/{code_barres}` (Open Food Facts),
   `POST /journal/{date}/{type_repas}/aliments` (valeurs pour 100 g + grammes, ou par portion), `PATCH`/`DELETE /aliments/{id}`.
 - `app/openfoodfacts.py` : client Open Food Facts (seul le code-barres est transmis).
+- `app/gemini.py` + `POST /journal/{date}/{type_repas}/photo` : estimation IA d'une photo, aliments enregistrés avec
+  `est_estimation = true` (corrigeables via `PATCH`). Photo ni stockée ni journalisée. Désactivé si `PHOTO_IA_ACTIVE` ≠ `true`.
+- `app/depot_sport.py` + `app/routes_sport.py` : `GET /seances/semaine?date=`, `POST /seances/{id}/validation`
+  (historique dans `seances_realisees`, renvoie la redirection la plus spécifique), `GET /boutons?emplacement=`.
+- `app/systemeio.py` : `POST /webhooks/systemeio` (`SALE_NEW` → client créé/réactivé, `SALE_CANCELED` → `RESILIE`).
+  Un client résilié reçoit 403 sur toutes les routes client.
 - `requirements.txt` épinglé ; `requirements-dev.txt` ajoute pytest.
 - Tests : `.venv\Scripts\python.exe -m pytest -q` (Supabase simulé, aucun appel réseau).
 
@@ -115,6 +124,9 @@ CREATE TABLE public.aliments_scannes (
 
 Réglés en Phase 1 (branche `feat/securite`) : 1, 3, 10 (dépendance), 11.
 Réglés en Phase 2 (branche `feat/schema-v2`, appliqué en base) : 2, 5, 6, 7, 8, 9 ; 12 partiellement (région UE confirmée, colonne `consentement_sante_le`).
+Réglé en Phase 3 (branche `feat/onboarding`) : 4. Reste pour la Phase 3 : webhook Make/Google Forms complet (liste des questions à fournir).
+
+Branches empilées (chacune part de la précédente) : `feat/outillage` → `feat/securite` → `feat/schema-v2` → `feat/nutrition` → `feat/sport` → `feat/onboarding`.
 
 1. Webhook `/webhooks/nouveau-client` **non authentifié** : n'importe qui peut créer des clients.
 2. **RLS désactivé** sur toutes les tables ; `clients` non lié à `auth.users`.
