@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from supabase_auth.errors import AuthApiError
 from fastapi.testclient import TestClient
 
 from app import openfoodfacts
@@ -10,10 +11,11 @@ from app.auth import client_courant, utilisateur_courant
 from app.db import get_supabase
 from app.depot import get_depot
 from app.main import app
+from tests.conftest import JETON
 
 CLIENT = {
     "id": "c1", "nom": "Jean", "target_kcal": 2000,
-    "target_proteines": 150, "target_glucides": 200, "target_lipides": 60,
+    "target_proteines": 150, "target_glucides": 200, "target_lipides": 60, "statut_abonnement": "ACTIF",
 }
 
 
@@ -49,6 +51,9 @@ class FauxDepot:
         self.aliments[aid] = {"id": aid, "created_at": f"t{len(self.aliments)}", **donnees}
         return self.aliments[aid]
 
+    def ajouter_aliments(self, lignes):
+        return [self.ajouter_aliment(l) for l in lignes]
+
     def aliment_du_client(self, aliment_id, client_id):
         a = self.aliments.get(aliment_id)
         if a and self.repas[a["repas_id"]]["client_id"] == client_id:
@@ -74,7 +79,7 @@ def depot():
 
 @pytest.fixture
 def api(depot):
-    return TestClient(app)
+    return TestClient(app, headers=JETON)
 
 
 POULET = {"nom_aliment": "Poulet", "quantite_g": 150, "kcal": 120, "proteines": 23, "glucides": 0, "lipides": 2.5}
@@ -184,7 +189,9 @@ class FauxAuth:
     def get_user(self, jeton):
         if jeton == "bon":
             return SimpleNamespace(user=SimpleNamespace(id="u1"))
-        raise Exception("jeton invalide")
+        if jeton == "panne":
+            raise AuthApiError("Service Unavailable", 503, "unexpected_failure")
+        raise AuthApiError("invalid JWT", 401, "bad_jwt")
 
 
 @pytest.fixture
@@ -211,7 +218,7 @@ def test_jeton_valide(api_auth):
 
 def test_compte_sans_fiche_client(api_auth):
     app.dependency_overrides[utilisateur_courant] = lambda: "inconnu"
-    assert api_auth.get("/journal").status_code == 403
+    assert api_auth.get("/journal", headers=JETON).status_code == 403
 
 
 # --- Open Food Facts --------------------------------------------------------
@@ -260,3 +267,83 @@ def test_route_produit(api, monkeypatch):
         raise openfoodfacts.ProduitIntrouvable()
     monkeypatch.setattr(openfoodfacts, "chercher_produit", introuvable)
     assert api.get("/produits/12345678").status_code == 404
+
+
+def test_route_produit_limite_de_debit(api, monkeypatch):
+    monkeypatch.setattr(openfoodfacts, "chercher_produit",
+                        lambda code: {"code_barres": code, "nom": "Test", "pour_100g": {}})
+    codes = [api.get("/produits/12345678").status_code for _ in range(31)]
+    assert codes == [200] * 30 + [429]
+    assert int(api.get("/produits/12345678").headers["Retry-After"]) > 0
+
+
+# --- Bornes alignées sur les colonnes réelles -------------------------------
+
+@pytest.mark.parametrize("aliment", [
+    {**POULET, "quantite_g": 0.04},     # NUMERIC(7,1) : arrondi à 0, refusé par le CHECK > 0
+    {**POULET, "quantite_g": 0.09},     # sous le minimum de 0,1 g
+    {**POULET, "nom_aliment": "   "},   # vide une fois les espaces retirés
+])
+def test_ajout_hors_bornes(api, depot, aliment):
+    assert ajouter(api, aliment).status_code == 422
+    assert depot.aliments == {}
+
+
+def test_petite_quantite_acceptee(api):
+    # Sel, épices : quelques dixièmes de gramme
+    assert ajouter(api, {**POULET, "nom_aliment": "Sel", "quantite_g": 0.5, "kcal": 0}).status_code == 201
+
+
+def test_quantite_arrondie_au_dixieme(api):
+    assert ajouter(api, {**POULET, "quantite_g": 150.26}).json()["quantite_g"] == 150.3
+
+
+@pytest.mark.parametrize("modif", [{"quantite_g": 0.05}, {"nom_aliment": "  "}, {"kcal": 6000}])
+def test_modif_hors_bornes(api, modif):
+    a = ajouter(api).json()
+    assert api.patch(f"/aliments/{a['id']}", json=modif).status_code == 422
+
+
+def test_prorata_au_dela_de_la_capacite_refuse(api, depot):
+    # « 1 g » saisi pour « 1 portion », puis quantité corrigée seule : 60 g de glucides × 200 = 12 000 g
+    a = ajouter(api, {"nom_aliment": "Pâtes", "base": "portion", "quantite_g": 1, "kcal": 500,
+                      "glucides": 60}).json()
+    r = api.patch(f"/aliments/{a['id']}", json={"quantite_g": 200})
+    assert r.status_code == 422 and "kcal" in r.json()["detail"]
+    assert depot.aliments[a["id"]]["glucides"] == 60
+
+
+def test_prorata_au_maximum_d_une_saisie_pour_100g(api):
+    huile = {"nom_aliment": "Huile", "quantite_g": 100, "kcal": 900, "lipides": 100}
+    a = ajouter(api, huile).json()
+    r = api.patch(f"/aliments/{a['id']}", json={"quantite_g": 3000})
+    assert r.status_code == 200 and (r.json()["kcal"], r.json()["lipides"]) == (27000, 3000.0)
+
+
+# --- Erreurs de la base -----------------------------------------------------
+
+def test_erreur_postgrest_json_generique_sans_detail_journalise(api, depot, monkeypatch, caplog):
+    from postgrest.exceptions import APIError
+
+    def refus(_donnees):
+        raise APIError({"code": "23514", "message": "violates check constraint",
+                        "details": "Failing row contains (secret-sante)"})
+    monkeypatch.setattr(depot, "ajouter_aliment", refus)
+    r = ajouter(api)
+    assert r.status_code == 422 and r.json() == {"detail": "Valeurs refusées par la base de données."}
+    assert "secret-sante" not in caplog.text and "23514" in caplog.text
+
+
+def test_base_non_configuree_503_json(monkeypatch):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    get_supabase.cache_clear()
+    r = TestClient(app, headers={"Authorization": "Bearer x"}).get("/journal")
+    assert r.status_code == 503 and r.json() == {"detail": "Base de données non configurée."}
+    # Sans jeton, le refus 401 arrive avant tout accès à la base
+    assert TestClient(app).get("/journal").status_code == 401
+
+
+def test_panne_supabase_ne_deconnecte_pas(api_auth):
+    # 503 (réessayer plus tard) et non 401 (qui renverrait le client à l'écran de connexion)
+    assert api_auth.get("/journal", headers={"Authorization": "Bearer panne"}).status_code == 503

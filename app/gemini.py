@@ -10,6 +10,8 @@ import os
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app.constantes import Nom
+
 MODELE_PAR_DEFAUT = "gemini-3.8-flash"
 
 CONSIGNE = (
@@ -21,8 +23,11 @@ CONSIGNE = (
 
 
 class AlimentEstime(BaseModel):
-    nom_aliment: str = Field(min_length=1, max_length=200)
-    quantite_g: float = Field(gt=0, le=3000)
+    # Ce modèle sert aussi de response_schema : n'utiliser que des bornes inclusives (ge / le).
+    # « gt » produit « exclusiveMinimum », que google-genai refuse AVANT tout envoi (extra_forbidden).
+    # La quantité est ramenée à 1 g minimum lors de l'enregistrement (routes_nutrition).
+    nom_aliment: Nom
+    quantite_g: float = Field(ge=0, le=3000)
     kcal: float = Field(ge=0, le=5000)
     proteines: float = Field(ge=0, le=1000)
     glucides: float = Field(ge=0, le=1000)
@@ -61,11 +66,13 @@ class EstimateurGemini:
                     temperature=0.2,
                 ),
             )
-            estimation = Estimation.model_validate_json(reponse.text or "")
-        except ValidationError as e:
-            raise EstimationImpossible("Réponse de l'IA inexploitable.") from e
-        except Exception as e:  # erreurs réseau / quota / API : pas de détail (pas de fuite de contenu)
+        except Exception as e:
+            # Construction de la requête, réseau, quota, API : pas de détail (pas de fuite de contenu)
             raise EstimationImpossible("Service d'estimation indisponible.") from e
+        try:
+            estimation = Estimation.model_validate_json(reponse.text or "")
+        except (ValidationError, ValueError) as e:  # réponse de Gemini hors du format attendu
+            raise EstimationImpossible("Réponse de l'IA inexploitable.") from e
         return [a.model_dump() for a in estimation.aliments]
 
 

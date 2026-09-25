@@ -9,6 +9,7 @@ from app.auth import utilisateur_courant
 from app.db import get_supabase
 from app.depot import get_depot
 from app.main import app
+from tests.conftest import JETON
 from app.systemeio import normaliser, signature_valide
 
 SECRET = "secret-systeme"
@@ -64,17 +65,21 @@ def clients(monkeypatch):
     app.dependency_overrides.clear()
 
 
-def vente(email="Marie@Exemple.fr", prenom="Marie", nom="Dupré"):
+def vente(email="Marie@Exemple.fr", prenom="Marie", nom="Dupré", plan=94283):
     return {"customer": {"contactId": 987, "email": email,
                          "fields": {"first_name": prenom, "surname": nom}},
-            "pricePlan": {"name": "Coaching / mois"}}
+            "pricePlan": {"id": plan, "name": "Coaching / mois"}}
 
 
-def envoyer(evenement, donnees, signer=True, secret=SECRET, brut=None):
+def envoyer(evenement, donnees, signer=True, secret=SECRET, brut=None, horodatage=None, signature=None):
     corps = brut if brut is not None else json.dumps(donnees, ensure_ascii=False, indent=2).encode()
     en_tetes = {"X-Webhook-Event": evenement, "Content-Type": "application/json"}
-    if signer:
+    if signature:
+        en_tetes["X-Webhook-Signature"] = signature
+    elif signer:
         en_tetes["X-Webhook-Signature"] = hmac.new(secret.encode(), normaliser(corps), hashlib.sha256).hexdigest()
+    if horodatage:
+        en_tetes["X-Webhook-Event-Timestamp"] = horodatage
     return TestClient(app).post("/webhooks/systemeio", content=corps, headers=en_tetes)
 
 
@@ -151,14 +156,99 @@ def test_email_absent(clients):
     assert envoyer("SALE_NEW", {"customer": {}}).status_code == 422
 
 
+def test_vente_active_une_fiche_en_attente(clients):
+    clients.append({"id": "x", "email": "marie@exemple.fr", "nom": "Marie", "statut_abonnement": "EN_ATTENTE",
+                    "abonnement_maj_le": None})
+    assert envoyer("SALE_NEW", vente()).json()["action"] == "abonnement_actif"
+    assert clients[0]["statut_abonnement"] == "ACTIF"
+
+
+# --- Ordre des événements et rejeu ------------------------------------------
+
+T1, T2 = "2026-09-01T10:00:00+00:00", "2026-09-20T08:30:00+00:00"
+
+
+def test_horodatage_de_l_evenement_enregistre(clients):
+    envoyer("SALE_NEW", vente(), horodatage=T1)
+    assert clients[0]["abonnement_maj_le"] == T1
+
+
+def test_evenement_plus_ancien_ignore(clients):
+    envoyer("SALE_NEW", vente(), horodatage=T1)
+    envoyer("SALE_CANCELED", vente(), horodatage=T2)
+    # Nouvelle livraison tardive (ou rejeu) de la vente : même horodatage d'événement T1
+    r = envoyer("SALE_NEW", vente(), horodatage=T1)
+    assert r.json()["status"] == "ignore"
+    assert (clients[0]["statut_abonnement"], clients[0]["abonnement_maj_le"]) == ("RESILIE", T2)
+
+
+def test_nouvel_achat_apres_resiliation(clients):
+    envoyer("SALE_NEW", vente(), horodatage=T1)
+    envoyer("SALE_CANCELED", vente(), horodatage=T2)
+    envoyer("SALE_NEW", vente(), horodatage="2026-09-24T09:00:00Z")
+    assert clients[0]["statut_abonnement"] == "ACTIF"
+
+
+def test_resiliation_ancienne_ignoree(clients):
+    envoyer("SALE_NEW", vente(), horodatage=T2)
+    assert envoyer("SALE_CANCELED", vente(), horodatage=T1).json()["status"] == "ignore"
+    assert clients[0]["statut_abonnement"] == "ACTIF"
+
+
+# --- Offres suivies ---------------------------------------------------------
+
+def test_offre_non_suivie_ignoree(clients, monkeypatch):
+    monkeypatch.setenv("SYSTEMEIO_PRICE_PLAN_IDS", "111, 94283")
+    r = envoyer("SALE_NEW", vente(plan=555))  # ex. un ebook vendu sur le même compte
+    assert r.json() == {"status": "ignore", "raison": "offre non suivie"} and clients == []
+    envoyer("SALE_NEW", vente(plan=94283))
+    assert clients[0]["statut_abonnement"] == "ACTIF"
+
+
+def test_remboursement_d_une_autre_offre_ne_resilie_pas(clients, monkeypatch):
+    monkeypatch.setenv("SYSTEMEIO_PRICE_PLAN_IDS", "94283")
+    envoyer("SALE_NEW", vente())
+    assert envoyer("SALE_CANCELED", vente(plan=555)).json()["status"] == "ignore"
+    assert clients[0]["statut_abonnement"] == "ACTIF"
+
+
+# --- Corps hostiles ---------------------------------------------------------
+
+def test_json_tres_imbrique_non_signe(clients):
+    corps = b"[" * 30000 + b"]" * 30000  # < 64 Ko, mais au-delà de la profondeur de récursion
+    assert envoyer("SALE_NEW", None, brut=corps, signature="0" * 64).status_code == 401
+
+
+def test_json_tres_imbrique_signe(clients):
+    corps = b"[" * 30000 + b"]" * 30000
+    signature = hmac.new(SECRET.encode(), corps, hashlib.sha256).hexdigest()  # signature du corps brut
+    assert envoyer("SALE_NEW", None, brut=corps, signature=signature).status_code == 422
+    assert clients == []
+
+
+def test_corps_trop_volumineux(clients):
+    corps = json.dumps({"customer": {"email": "a@b.fr"}, "x": "a" * 70_000}).encode()
+    assert envoyer("SALE_NEW", None, brut=corps).status_code == 413
+    assert clients == []
+
+
 # --- Accès bloqué après résiliation -----------------------------------------
 
-def test_client_resilie_bloque():
-    depot = type("D", (), {"client_par_user_id": lambda self, uid: {"id": "c1", "statut_abonnement": "RESILIE"}})()
+@pytest.mark.parametrize("statut, extrait", [
+    ("RESILIE", "résilié"), ("EN_ATTENTE", "attente"), (None, "inactif"), ("INCONNU", "inactif")])
+def test_seul_un_abonnement_actif_donne_acces(statut, extrait):
+    depot = type("D", (), {"client_par_user_id": lambda self, uid: {"id": "c1", "statut_abonnement": statut}})()
     app.dependency_overrides[get_depot] = lambda: depot
     app.dependency_overrides[utilisateur_courant] = lambda: "u1"
     try:
-        r = TestClient(app).get("/journal")
-        assert r.status_code == 403 and "résilié" in r.json()["detail"]
+        r = TestClient(app, headers=JETON).get("/journal")
+        assert r.status_code == 403 and extrait in r.json()["detail"]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_horodatage_futur_ramene_a_maintenant(clients):
+    # L'en-tête n'est pas signé : une date en 2099 ne doit pas bloquer les vrais événements suivants
+    r = envoyer("SALE_NEW", vente(), horodatage="2099-01-01T00:00:00+00:00")
+    assert r.status_code == 200
+    assert clients[0]["abonnement_maj_le"] < "2099"

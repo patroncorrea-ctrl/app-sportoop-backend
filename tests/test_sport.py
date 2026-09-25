@@ -8,6 +8,7 @@ from app import routes_sport
 from app.auth import client_courant
 from app.depot_sport import get_depot_sport
 from app.main import app
+from tests.conftest import JETON
 from app.routes_sport import choisir_redirection
 
 S_LUNDI = str(uuid.uuid4())
@@ -63,7 +64,7 @@ def depot(monkeypatch):
 
 @pytest.fixture
 def api(depot):
-    return TestClient(app)
+    return TestClient(app, headers=JETON)
 
 
 # --- Programme de la semaine ------------------------------------------------
@@ -101,7 +102,7 @@ def test_validation_date_par_defaut(api, depot):
 
 
 def test_validation_future_refusee(api, depot):
-    r = api.post(f"/seances/{S_LUNDI}/validation", json={"date": "2026-09-26"})
+    r = api.post(f"/seances/{S_LUNDI}/validation", json={"date": "2026-09-27"})
     assert r.status_code == 422 and depot.realisations == {}
 
 

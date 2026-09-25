@@ -7,13 +7,15 @@
   <title>ADRM Sportoop</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icones/icone.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="icones/icone.svg">
+  <!-- iOS n'accepte pas le SVG pour l'icône de l'écran d'accueil : PNG 180×180 opaque -->
+  <link rel="apple-touch-icon" sizes="180x180" href="icones/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-title" content="Sportoop">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: "class" };</script>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen">
-  <div id="app" class="max-w-2xl mx-auto"></div>
+  <div id="app" class="max-w-2xl mx-auto"><p class="p-6 text-center text-slate-400">Chargement…</p></div>
   <script type="module" src="client.js"></script>
 </body>
 </html>

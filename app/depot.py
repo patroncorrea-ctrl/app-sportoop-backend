@@ -56,6 +56,10 @@ class DepotNutrition:
     def ajouter_aliment(self, donnees: dict) -> dict:
         return self.db.table("aliments_scannes").insert(donnees).execute().data[0]
 
+    def ajouter_aliments(self, lignes: list[dict]) -> list[dict]:
+        """Insertion groupée : un seul appel PostgREST, donc tout ou rien."""
+        return self.db.table("aliments_scannes").insert(lignes).execute().data
+
     def aliment_du_client(self, aliment_id: str, client_id: str) -> dict | None:
         """L'aliment seulement s'il appartient à un repas de ce client."""
         lignes = (

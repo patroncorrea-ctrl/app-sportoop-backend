@@ -7,6 +7,7 @@ from app import gemini
 from app.auth import utilisateur_courant
 from app.depot import get_depot
 from app.main import app
+from tests.conftest import JETON
 from app.routes_nutrition import estimateur_disponible
 from tests.test_nutrition import FauxDepot
 
@@ -38,7 +39,7 @@ def depot():
 
 def envoyer(estimateur, contenu=b"\xff\xd8image", mime="image/jpeg"):
     app.dependency_overrides[estimateur_disponible] = lambda: estimateur
-    return TestClient(app).post(
+    return TestClient(app, headers=JETON).post(
         "/journal/2026-09-25/DEJEUNER/photo", files={"photo": ("assiette.jpg", contenu, mime)})
 
 
@@ -54,7 +55,7 @@ def test_aliments_estimes_enregistres_comme_estimation(depot):
 
 def test_correction_leve_le_marqueur_estimation(depot):
     riz = envoyer(FauxEstimateur(ASSIETTE)).json()["aliments"][0]
-    r = TestClient(app).patch(f"/aliments/{riz['id']}", json={"quantite_g": 90})
+    r = TestClient(app, headers=JETON).patch(f"/aliments/{riz['id']}", json={"quantite_g": 90})
     assert r.json()["est_estimation"] is False and r.json()["kcal"] == 117
 
 
@@ -84,7 +85,7 @@ def test_panne_ia(depot):
 def test_service_desactive_par_defaut(depot, monkeypatch):
     monkeypatch.delenv("PHOTO_IA_ACTIVE", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "cle")
-    r = TestClient(app).post("/journal/2026-09-25/DEJEUNER/photo",
+    r = TestClient(app, headers=JETON).post("/journal/2026-09-25/DEJEUNER/photo",
                              files={"photo": ("a.jpg", b"img", "image/jpeg")})
     assert r.status_code == 503
 
@@ -130,3 +131,60 @@ def test_gemini_reponse_incoherente():
 def test_gemini_erreur_api():
     with pytest.raises(gemini.EstimationImpossible):
         _estimateur_avec(erreur=RuntimeError("quota")).estimer(b"img", "image/jpeg")
+
+
+def test_gemini_config_acceptee_par_le_vrai_sdk():
+    """Le vrai SDK google-genai convertit le schéma et construit la requête (transport simulé, aucun réseau)."""
+    import json
+
+    import httpx
+    from google import genai
+    from google.genai import types
+
+    requetes = []
+
+    def transport(req):
+        requetes.append(json.loads(req.content))
+        texte = json.dumps({"aliments": [{"nom_aliment": " Pomme ", "quantite_g": 150, "kcal": 78,
+                                          "proteines": 0.4, "glucides": 21, "lipides": 0.3}]})
+        return httpx.Response(200, json={"candidates": [
+            {"content": {"role": "model", "parts": [{"text": texte}]}, "finishReason": "STOP"}]})
+
+    est = gemini.EstimateurGemini("fausse-cle", "modele-test")
+    est.client = genai.Client(api_key="fausse-cle", http_options=types.HttpOptions(
+        httpx_client=httpx.Client(transport=httpx.MockTransport(transport))))
+    assert est.estimer(b"\xff\xd8img", "image/jpeg") == [
+        {"nom_aliment": "Pomme", "quantite_g": 150.0, "kcal": 78.0, "proteines": 0.4, "glucides": 21.0,
+         "lipides": 0.3}]
+    assert len(requetes) == 1  # la requête a bien été construite puis envoyée au transport
+    config = requetes[0]["generationConfig"]
+    assert config["responseMimeType"] == "application/json"
+    schema_aliment = config["responseSchema"]["properties"]["aliments"]["items"]["properties"]
+    assert schema_aliment["quantite_g"]["minimum"] == 0 and "exclusiveMinimum" not in json.dumps(config)
+
+
+def test_quantite_estimee_ramenee_au_minimum(depot):
+    sel = {"nom_aliment": "Sel", "quantite_g": 0.04, "kcal": 0, "proteines": 0, "glucides": 0, "lipides": 0}
+    r = envoyer(FauxEstimateur([sel]))
+    assert r.status_code == 201 and r.json()["aliments"][0]["quantite_g"] == 0.1
+
+
+def test_limite_de_debit_photo(depot):
+    e = FauxEstimateur(ASSIETTE)
+    codes = [envoyer(e).status_code for _ in range(7)]
+    assert codes == [201] * 6 + [429]
+    assert e.appels == 6  # la 7e photo n'est pas envoyée à Gemini
+
+
+def test_photo_sans_jeton_refusee_avant_lecture(depot):
+    e = FauxEstimateur(ASSIETTE)
+    app.dependency_overrides[estimateur_disponible] = lambda: e
+    r = TestClient(app).post("/journal/2026-09-25/DEJEUNER/photo",
+                             files={"photo": ("a.jpg", b"x" * 100_000, "image/jpeg")})
+    assert r.status_code == 401 and e.appels == 0 and depot.aliments == {}
+
+
+def test_photo_au_dela_de_9_mo(depot):
+    e = FauxEstimateur(ASSIETTE)
+    r = envoyer(e, contenu=b"x" * (9 * 1024 * 1024 + 1))
+    assert r.status_code == 413 and e.appels == 0
