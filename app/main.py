@@ -3,9 +3,11 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from supabase import Client
 
 from app.db import get_supabase
+from app.routes_nutrition import router as router_nutrition
 from app.security import verifier_secret_webhook
 
 app = FastAPI(title="ADRM SPORTOOP API")
+app.include_router(router_nutrition)
 
 
 @app.get("/")
