@@ -40,6 +40,7 @@ Application web/mobile responsive de coaching sportif et nutritionnel personnali
 | `GEMINI_API_KEY` | Clé API Google Gemini (niveau **payant** : le gratuit peut réutiliser les photos) |
 | `GEMINI_MODEL` | Modèle Gemini (défaut `gemini-3.8-flash`) |
 | `PHOTO_IA_ACTIVE` | `true` pour activer l'estimation par photo (après mise à jour de la politique de confidentialité) |
+| `APP_URL` | Adresse publique (liens d'invitation) ; défaut : l'hôte de la requête |
 | `SYSTEMEIO_WEBHOOK_SECRET` | Secret du webhook Systeme.io (signature HMAC-SHA256, header `X-Webhook-Signature`) |
 
 ## Base Supabase
@@ -103,7 +104,8 @@ CREATE TABLE public.aliments_scannes (
 ## Code actuel
 
 - `main.py` (racine) : point d'entrée Railway, réexporte `app.main:app`.
-- `app/main.py` : `GET /` (statut) et `POST /webhooks/nouveau-client` (protégé par `X-Webhook-Secret`, upsert sur `email`).
+- `app/main.py` : `GET /` (statut), frontend servi sur `/app/`, `POST /webhooks/nouveau-client` (Make/Google Forms, protégé par
+  `X-Webhook-Secret`, upsert sur `email` ; `contraintes_sante` refusées sans `consentement_sante: true`).
 - `app/db.py` : client Supabase unique (`get_supabase`, dépendance FastAPI, surchargeable en test).
 - `app/security.py` : vérification du secret webhook (comparaison à temps constant ; 503 si `WEBHOOK_SECRET` absent).
 - `app/auth.py` : `utilisateur_courant` (vérifie le JWT Supabase via `auth.get_user`) et `client_courant` (fiche `clients` liée, 403 sinon).
@@ -117,6 +119,11 @@ CREATE TABLE public.aliments_scannes (
   (historique dans `seances_realisees`, renvoie la redirection la plus spécifique), `GET /boutons?emplacement=`.
 - `app/systemeio.py` : `POST /webhooks/systemeio` (`SALE_NEW` → client créé/réactivé, `SALE_CANCELED` → `RESILIE`).
   Un client résilié reçoit 403 sur toutes les routes client.
+- `app/routes_coach.py` : `POST /coach/clients/{id}/invitation` (coach uniquement : invitation Supabase + liaison `user_id`).
+- `web/` : frontend sans build (HTML + Tailwind CDN + supabase-js). `index.html`/`client.js` = application client (PWA),
+  `coach/` = espace coach (accès direct Supabase, protégé par la RLS), `config.js` = URL + clé **publishable** uniquement.
+- `docs/mise-en-production.md` : actions réservées au propriétaire (secrets, Railway, Supabase Auth, Systeme.io, Make).
+- `docs/politique-confidentialite.md` : projet RGPD à compléter et faire valider.
 - `requirements.txt` épinglé ; `requirements-dev.txt` ajoute pytest.
 - Tests : `.venv\Scripts\python.exe -m pytest -q` (Supabase simulé, aucun appel réseau).
 
@@ -126,7 +133,8 @@ Réglés en Phase 1 (branche `feat/securite`) : 1, 3, 10 (dépendance), 11.
 Réglés en Phase 2 (branche `feat/schema-v2`, appliqué en base) : 2, 5, 6, 7, 8, 9 ; 12 partiellement (région UE confirmée, colonne `consentement_sante_le`).
 Réglé en Phase 3 (branche `feat/onboarding`) : 4. Reste pour la Phase 3 : webhook Make/Google Forms complet (liste des questions à fournir).
 
-Branches empilées (chacune part de la précédente) : `feat/outillage` → `feat/securite` → `feat/schema-v2` → `feat/nutrition` → `feat/sport` → `feat/onboarding`.
+Branches empilées (chacune part de la précédente) : `feat/outillage` → `feat/securite` → `feat/schema-v2` → `feat/nutrition` → `feat/sport` → `feat/onboarding` → `feat/frontend` → `feat/onboarding-formulaire` (contient tout).
+Railway : projet `happy-simplicity`, service `app-sportoop-backend`, déploie `main` du dépôt `patroncorrea-ctrl/app-sportoop-backend` (ancien nom `app-sportoop`).
 
 1. Webhook `/webhooks/nouveau-client` **non authentifié** : n'importe qui peut créer des clients.
 2. **RLS désactivé** sur toutes les tables ; `clients` non lié à `auth.users`.
