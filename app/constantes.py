@@ -23,5 +23,8 @@ TypeRepas = Literal[
     "POST_WORKOUT",
 ]
 
+# Valeurs exactes de seances.jour_semaine, index = date.weekday()
+JOURS_SEMAINE = ("Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche")
+
 # Fuseau de référence pour « aujourd'hui »
 FUSEAU = ZoneInfo("Europe/Paris")
