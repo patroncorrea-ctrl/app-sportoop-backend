@@ -1,0 +1,14 @@
+{
+  "name": "ADRM Sportoop",
+  "short_name": "Sportoop",
+  "description": "Coaching sportif et nutritionnel personnalisé",
+  "lang": "fr",
+  "start_url": "/app/",
+  "scope": "/app/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "icons": [
+    { "src": "icones/icone.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
