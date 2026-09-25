@@ -20,7 +20,7 @@ class DepotNutrition:
     def client_par_user_id(self, user_id: str) -> dict | None:
         lignes = (
             self.db.table("clients")
-            .select("id,nom,target_kcal,target_proteines,target_glucides,target_lipides")
+            .select("id,nom,target_kcal,target_proteines,target_glucides,target_lipides,statut_abonnement")
             .eq("user_id", user_id)
             .limit(1)
             .execute()

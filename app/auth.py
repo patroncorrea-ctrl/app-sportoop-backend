@@ -30,4 +30,6 @@ def client_courant(
     client = depot.client_par_user_id(user_id)
     if not client:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Aucune fiche client liée à ce compte.")
+    if client.get("statut_abonnement") == "RESILIE":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Abonnement résilié.")
     return client
