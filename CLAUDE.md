@@ -103,7 +103,12 @@ CREATE TABLE public.aliments_scannes (
 - `app/main.py` : `GET /` (statut) et `POST /webhooks/nouveau-client` (protégé par `X-Webhook-Secret`, upsert sur `email`).
 - `app/db.py` : client Supabase unique (`get_supabase`, dépendance FastAPI, surchargeable en test).
 - `app/security.py` : vérification du secret webhook (comparaison à temps constant ; 503 si `WEBHOOK_SECRET` absent).
-- `requirements.txt` épinglé ; `requirements-dev.txt` ajoute pytest/httpx.
+- `app/auth.py` : `utilisateur_courant` (vérifie le JWT Supabase via `auth.get_user`) et `client_courant` (fiche `clients` liée, 403 sinon).
+- `app/depot.py` : `DepotNutrition`, tout l'accès Supabase de la nutrition (contrôle d'appartenance inclus, car la clé service_role contourne la RLS).
+- `app/routes_nutrition.py` : `GET /journal?date=` (8 blocs, totaux, restant), `GET /produits/{code_barres}` (Open Food Facts),
+  `POST /journal/{date}/{type_repas}/aliments` (valeurs pour 100 g + grammes, ou par portion), `PATCH`/`DELETE /aliments/{id}`.
+- `app/openfoodfacts.py` : client Open Food Facts (seul le code-barres est transmis).
+- `requirements.txt` épinglé ; `requirements-dev.txt` ajoute pytest.
 - Tests : `.venv\Scripts\python.exe -m pytest -q` (Supabase simulé, aucun appel réseau).
 
 ## Problèmes connus (issus de l'audit)
