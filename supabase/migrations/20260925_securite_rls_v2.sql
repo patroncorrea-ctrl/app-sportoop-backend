@@ -1,6 +1,6 @@
 -- Sécurité RLS v2 — ADRM SPORTOOP (suite de l'audit du 25/09/2026)
 --
--- NON EXÉCUTÉE : à montrer au propriétaire, puis à exécuter dans Supabase (SQL Editor) AVANT de déployer
+-- APPLIQUÉE le 25/09/2026 (18h22 UTC) après validation du propriétaire. À exécuter AVANT de déployer
 -- le code de la branche fix/audit (le webhook du formulaire écrit statut_abonnement = 'EN_ATTENTE' et lit
 -- formulaire_recu_le : sans cette migration, il échoue). L'inverse est sans risque : le code actuellement
 -- en production fonctionne avec cette migration (il n'écrit jamais EN_ATTENTE ni formulaire_recu_le, le

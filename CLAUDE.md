@@ -50,10 +50,10 @@ sans écraser les variables déjà définies). En production (Railway), pas de `
 ## Base Supabase
 
 - Projet `frhmfyvrcdzohsgdjjwr`, région `eu-west-1` (UE), PostgreSQL 17.
-- Migrations appliquées le 2026-09-25 : `20260925_schema_v2.sql`, `20260925_durcissement_rls.sql`, `20260925_abonnement_systemeio.sql`
+- Migrations appliquées le 2026-09-25 : `20260925_schema_v2.sql`, `20260925_durcissement_rls.sql`, `20260925_abonnement_systemeio.sql`,
+  `20260925_securite_rls_v2.sql` (validée par le propriétaire, appliquée à 18h22 UTC et vérifiée : contrainte, colonnes, trigger, policies)
   (fonctions RLS `prive.est_coach()` / `prive.mon_client_id()` dans le schéma `prive`, non exposé).
-- **En attente de validation (NON exécutée)** : `20260925_securite_rls_v2.sql`. À exécuter **avant** de déployer le code de
-  `fix/audit`, qui en dépend (statut `EN_ATTENTE`, colonne `formulaire_recu_le`). Contenu : statut `EN_ATTENTE` autorisé,
+- Détail de `20260925_securite_rls_v2.sql` (APPLIQUÉE : le code de `fix/audit` peut être déployé), dont ce code dépend (statut `EN_ATTENTE`, colonne `formulaire_recu_le`). Contenu : statut `EN_ATTENTE` autorisé,
   colonne `clients.formulaire_recu_le`, `prive.mon_client_id()` et `client_lit_sa_fiche` limités aux fiches `ACTIF`,
   plus aucune écriture directe du client (`client_gere_ses_repas` / `client_gere_ses_aliments` remplacées par
   `client_lit_ses_repas` / `client_lit_ses_aliments` en SELECT, `client_valide_une_seance` supprimée), règles et boutons
@@ -188,7 +188,7 @@ Branches empilées (chacune part de la précédente) : `feat/outillage` → `fea
 Audit du 2026-09-25 (branche `fix/audit`, non fusionnée) : statut `EN_ATTENTE` et formulaire reçu une seule fois,
 filtre des offres et ordre des événements Systeme.io, invitation avec diagnostic des refus d'envoi, suppression d'un
 client (effacement RGPD), RLS limitée aux abonnements `ACTIF` et en lecture seule pour les clients (migration
-`20260925_securite_rls_v2.sql` en attente de validation), limitation de débit et tailles maximales, chargement du `.env`
+`20260925_securite_rls_v2.sql`, appliquée), limitation de débit et tailles maximales, chargement du `.env`
 en local. Reste côté tableau de bord (propriétaire) : fermer les inscriptions publiques Supabase, configurer un SMTP
 personnalisé, protection des mots de passe (plan Pro) ou longueur minimale, Redirect URLs, variables Railway.
 Purge des données après la durée de conservation : revues manuelles (pas de tâche planifiée), mensuelle pour les

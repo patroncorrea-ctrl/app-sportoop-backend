@@ -9,8 +9,8 @@ listées **dans l'ordre où les faire**. Adresse publique : **https://app-sporto
 | Élément | État |
 |---|---|
 | Railway (projet `happy-simplicity`, service `app-sportoop-backend`) | `main` déployé (fusion de la PR #1, commit `6140486`), domaine public généré. **Aucune variable définie** : `/` et `/app/` répondent, mais toutes les routes de données échouent (base non configurée) et les webhooks répondent 503. |
-| Code de la branche `fix/audit` (corrections de l'audit) | Pas encore fusionné. Il **exige** la migration `20260925_securite_rls_v2.sql` (étape 3). |
-| Supabase (projet `frhmfyvrcdzohsgdjjwr`, UE) | Migrations `schema_v2`, `durcissement_rls`, `abonnement_systemeio` appliquées. `20260925_securite_rls_v2.sql` **écrite, pas exécutée** (en attente de validation). 0 client, 1 coach. |
+| Code de la branche `fix/audit` (corrections de l'audit) | Pas encore fusionné. La migration dont il dépend est appliquée : il peut être fusionné (étape 4). |
+| Supabase (projet `frhmfyvrcdzohsgdjjwr`, UE) | Migrations `schema_v2`, `durcissement_rls`, `abonnement_systemeio` appliquées. `20260925_securite_rls_v2.sql` **appliquée et vérifiée** (25/09, 18h22 UTC). 0 client, 1 coach. |
 | Supabase Auth | Inscriptions publiques **ouvertes** (à fermer, étape 1), pas de SMTP personnalisé connu, protection des mots de passe compromis désactivée (1 alerte du Security Advisor). |
 | Railway (facturation) | Compte en **période d'essai** : à convertir en formule payante (étape 2). |
 
@@ -72,7 +72,9 @@ cliquer sur **Deploy** pour les appliquer (redéploiement automatique).
 Garder **une seule instance** (*Settings → Deploy → Replicas* = 1, un seul worker uvicorn) : les limites de débit
 sont comptées en mémoire, par processus (voir étape 9).
 
-## 3. Migration SQL — AVANT de déployer le code de `fix/audit`
+## 3. Migration SQL — ✅ FAITE le 25/09/2026 (18h22 UTC)
+
+Conservé pour mémoire (ou pour recréer un projet Supabase).
 
 Fichier `supabase/migrations/20260925_securite_rls_v2.sql`, à relire puis à exécuter dans *Supabase → SQL Editor*.
 Elle est additive (aucune donnée supprimée) et s'exécute en une transaction : en cas d'erreur, rien n'est appliqué.
