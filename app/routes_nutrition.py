@@ -2,10 +2,10 @@ from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
 
-from app import openfoodfacts
+from app import gemini, openfoodfacts
 from app.auth import client_courant
 from app.constantes import FUSEAU, TYPES_REPAS, TypeRepas
 from app.depot import DepotNutrition, get_depot
@@ -190,3 +190,65 @@ def supprimer_aliment(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Aliment introuvable.")
     depot.supprimer_aliment(str(aliment_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Photo d'assiette (estimation Gemini, corrigeable)
+# ---------------------------------------------------------------------------
+TYPES_IMAGE = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+TAILLE_MAX_IMAGE = 8 * 1024 * 1024
+
+
+def estimateur_disponible():
+    try:
+        return gemini.get_estimateur()
+    except gemini.PhotoIADesactivee:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "L'estimation par photo n'est pas activée.")
+
+
+@router.post("/journal/{jour}/{type_repas}/photo", status_code=status.HTTP_201_CREATED)
+def ajouter_par_photo(
+    jour: date,
+    type_repas: TypeRepas,
+    photo: UploadFile = File(...),
+    client: dict = Depends(client_courant),
+    depot: DepotNutrition = Depends(get_depot),
+    estimateur=Depends(estimateur_disponible),
+):
+    """Ajoute les aliments estimés par l'IA, marqués « est_estimation » : à vérifier et corriger par le client.
+
+    La photo n'est ni stockée ni journalisée (donnée potentiellement sensible).
+    """
+    if photo.content_type not in TYPES_IMAGE:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Format d'image non pris en charge.")
+    image = photo.file.read(TAILLE_MAX_IMAGE + 1)
+    if len(image) > TAILLE_MAX_IMAGE:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Image trop lourde (8 Mo maximum).")
+    if not image:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Image vide.")
+
+    try:
+        estimes = estimateur.estimer(image, photo.content_type)
+    except gemini.EstimationImpossible as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+    if not estimes:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Aucun aliment reconnu sur la photo.")
+
+    repas_id = depot.obtenir_ou_creer_repas(client["id"], jour, type_repas)
+    aliments = [
+        depot.ajouter_aliment({
+            "repas_id": repas_id,
+            "nom_aliment": a["nom_aliment"].strip(),
+            "methode_ajout": "photo_ia",
+            "code_barres": None,
+            "quantite_g": round(a["quantite_g"], 1),
+            "kcal": round(a["kcal"]),
+            **{m: round(a[m], 1) for m in MACROS},
+            "est_estimation": True,
+        })
+        for a in estimes
+    ]
+    return {
+        "avertissement": "Estimation automatique : vérifiez et corrigez les quantités et les valeurs.",
+        "aliments": aliments,
+    }
