@@ -26,7 +26,7 @@ Application web/mobile responsive de coaching sportif et nutritionnel personnali
 
 - Frontend : HTML5 + Tailwind CSS (dark mode natif), futur PWA / Capacitor. Maquettes client et coach déjà réalisées.
 - Backend : Python FastAPI, hébergé sur Railway. Démarrage : `uvicorn main:app --host 0.0.0.0 --port $PORT`
-- Dépôt : `patroncorrea-ctrl/app-sportoop`
+- Dépôt : `patroncorrea-ctrl/app-sportoop-backend` (ancien nom `app-sportoop`, encore utilisé par le remote git local)
 - Base : Supabase (PostgreSQL), région UE (`eu-west-1`).
 - Services : Make.com (webhooks), Open Food Facts (gratuit), Google Gemini (vision), Systeme.io (ventes, abonnements, mails).
 
@@ -40,15 +40,42 @@ Application web/mobile responsive de coaching sportif et nutritionnel personnali
 | `GEMINI_API_KEY` | Clé API Google Gemini (niveau **payant** : le gratuit peut réutiliser les photos) |
 | `GEMINI_MODEL` | Modèle Gemini (défaut `gemini-3.8-flash`) |
 | `PHOTO_IA_ACTIVE` | `true` pour activer l'estimation par photo (après mise à jour de la politique de confidentialité) |
-| `APP_URL` | Adresse publique (liens d'invitation) ; défaut : l'hôte de la requête |
+| `APP_URL` | Adresse publique, sans `/app` ni `/` final (liens d'invitation) ; défaut : l'hôte de la requête. Production : `https://app-sportoop-backend-production.up.railway.app` |
 | `SYSTEMEIO_WEBHOOK_SECRET` | Secret du webhook Systeme.io (signature HMAC-SHA256, header `X-Webhook-Signature`) |
+| `SYSTEMEIO_PRICE_PLAN_IDS` | Facultatif : `pricePlan.id` des offres qui donnent accès, séparés par des virgules ; vide = toutes les ventes |
+
+En local, `main.py` charge le fichier `.env` de la racine s'il existe (python-dotenv, installé par `requirements-dev.txt`,
+sans écraser les variables déjà définies). En production (Railway), pas de `.env` : onglet Variables du service.
 
 ## Base Supabase
 
 - Projet `frhmfyvrcdzohsgdjjwr`, région `eu-west-1` (UE), PostgreSQL 17.
 - Migrations appliquées le 2026-09-25 : `20260925_schema_v2.sql`, `20260925_durcissement_rls.sql`, `20260925_abonnement_systemeio.sql`
   (fonctions RLS `prive.est_coach()` / `prive.mon_client_id()` dans le schéma `prive`, non exposé).
-- Security Advisor : 0 alerte après migration.
+- **En attente de validation (NON exécutée)** : `20260925_securite_rls_v2.sql`. À exécuter **avant** de déployer le code de
+  `fix/audit`, qui en dépend (statut `EN_ATTENTE`, colonne `formulaire_recu_le`). Contenu : statut `EN_ATTENTE` autorisé,
+  colonne `clients.formulaire_recu_le`, `prive.mon_client_id()` et `client_lit_sa_fiche` limités aux fiches `ACTIF`,
+  plus aucune écriture directe du client (`client_gere_ses_repas` / `client_gere_ses_aliments` remplacées par
+  `client_lit_ses_repas` / `client_lit_ses_aliments` en SELECT, `client_valide_une_seance` supprimée), règles et boutons
+  lisibles seulement avec une fiche `ACTIF`, colonne `clients.statut_modifie_le` posée par le trigger
+  `clients_date_statut` (fonction `prive.dater_changement_statut()`) à chaque changement réel de statut, quelle qu'en
+  soit l'origine, et non modifiable à la main. C'est elle, et non `abonnement_maj_le` (événements Systeme.io
+  seulement), qui date la revue de conservation. L'espace coach l'affiche si la colonne existe.
+- Security Advisor : **1 alerte** `auth_leaked_password_protection` (protection des mots de passe compromis), à régler
+  dans le tableau de bord Supabase Auth ; option réservée au plan Pro (organisation actuellement sur le plan gratuit).
+- État au 2026-09-25 : 0 client, 1 coach. Inscriptions publiques Supabase encore ouvertes (à fermer, voir
+  `docs/mise-en-production.md`).
+
+## Statuts d'abonnement (`clients.statut_abonnement`)
+
+| Statut | Origine | Accès |
+|---|---|---|
+| `ACTIF` | achat Systeme.io (`SALE_NEW`), fiche créée par le coach (valeur par défaut), ou choix du coach | oui |
+| `EN_ATTENTE` | fiche créée par le formulaire d'onboarding avant tout achat, ou choix du coach | non |
+| `RESILIE` | résiliation / remboursement Systeme.io (`SALE_CANCELED`), ou choix du coach | non |
+
+Seul `ACTIF` donne accès : API (`client_courant` renvoie 403 sinon) et base (RLS via `prive.mon_client_id()`, après la
+migration `securite_rls_v2`). Le coach change le statut depuis l'espace coach (update Supabase via la RLS `coach_tout`).
 
 ## Schéma v1 d'origine (avant les migrations ci-dessus)
 
@@ -103,12 +130,20 @@ CREATE TABLE public.aliments_scannes (
 
 ## Code actuel
 
-- `main.py` (racine) : point d'entrée Railway, réexporte `app.main:app`.
+- `main.py` (racine) : point d'entrée Railway, réexporte `app.main:app` ; charge `.env` en local si python-dotenv est installé.
 - `app/main.py` : `GET /` (statut), frontend servi sur `/app/`, `POST /webhooks/nouveau-client` (Make/Google Forms, protégé par
-  `X-Webhook-Secret`, upsert sur `email` ; `contraintes_sante` refusées sans `consentement_sante: true`).
-- `app/db.py` : client Supabase unique (`get_supabase`, dépendance FastAPI, surchargeable en test).
+  `X-Webhook-Secret`). Formulaire reçu **une seule fois** par e-mail : e-mail inconnu → fiche `EN_ATTENTE` +
+  `formulaire_recu_le` ; fiche existante jamais complétée (vente ou coach) → complétée, statut inchangé ; déjà reçu → 409.
+  Formats Make tolérés (chaîne vide = non répondu, nombres en texte, jours en texte ou liste, consentement « Oui » /
+  libellé coché) ; `contraintes_sante` refusées (422) sans consentement reconnu.
+- `app/limites.py` : middleware `ProtectionRequetes` (401 sans jeton sur les routes non publiques, 413 au-delà de 64 Ko,
+  9 Mo pour la photo) et limitation de débit en mémoire (photo 6/min et 40/jour par client ; produits 30/min par client,
+  90/min pour le serveur) → 429 + `Retry-After`. Compteurs par processus : une seule instance Railway.
+- `app/constantes.py` : statuts d'abonnement, 8 types de repas, jours, fuseau, type `Nom`.
+- `app/db.py` : client Supabase unique (`get_supabase`, dépendance FastAPI, surchargeable en test) ; 503 si non configuré.
 - `app/security.py` : vérification du secret webhook (comparaison à temps constant ; 503 si `WEBHOOK_SECRET` absent).
-- `app/auth.py` : `utilisateur_courant` (vérifie le JWT Supabase via `auth.get_user`) et `client_courant` (fiche `clients` liée, 403 sinon).
+- `app/auth.py` : `utilisateur_courant` (vérifie le JWT Supabase via `auth.get_user`) et `client_courant` (fiche `clients` liée
+  et abonnement `ACTIF`, 403 sinon avec le motif « en attente » / « résilié »).
 - `app/depot.py` : `DepotNutrition`, tout l'accès Supabase de la nutrition (contrôle d'appartenance inclus, car la clé service_role contourne la RLS).
 - `app/routes_nutrition.py` : `GET /journal?date=` (8 blocs, totaux, restant), `GET /produits/{code_barres}` (Open Food Facts),
   `POST /journal/{date}/{type_repas}/aliments` (valeurs pour 100 g + grammes, ou par portion), `PATCH`/`DELETE /aliments/{id}`.
@@ -117,15 +152,30 @@ CREATE TABLE public.aliments_scannes (
   `est_estimation = true` (corrigeables via `PATCH`). Photo ni stockée ni journalisée. Désactivé si `PHOTO_IA_ACTIVE` ≠ `true`.
 - `app/depot_sport.py` + `app/routes_sport.py` : `GET /seances/semaine?date=`, `POST /seances/{id}/validation`
   (historique dans `seances_realisees`, renvoie la redirection la plus spécifique), `GET /boutons?emplacement=`.
-- `app/systemeio.py` : `POST /webhooks/systemeio` (`SALE_NEW` → client créé/réactivé, `SALE_CANCELED` → `RESILIE`).
-  Un client résilié reçoit 403 sur toutes les routes client.
-- `app/routes_coach.py` : `POST /coach/clients/{id}/invitation` (coach uniquement : invitation Supabase + liaison `user_id`).
+- `app/systemeio.py` : `POST /webhooks/systemeio` (`SALE_NEW` → client créé ou passé `ACTIF`, `SALE_CANCELED` → `RESILIE`).
+  `abonnement_maj_le` = horodatage de l'événement ; un événement plus ancien est ignoré. Filtre `SYSTEMEIO_PRICE_PLAN_IDS`.
+  Un client non `ACTIF` reçoit 403 sur toutes les routes client.
+- `app/routes_coach.py` (coach uniquement, jeton Supabase) :
+  - `POST /coach/clients/{id}/invitation` : fiche sans compte → invitation Supabase + liaison `user_id`
+    (`"action": "invitation"`) ; compte déjà lié → lien de connexion / choix du mot de passe (`"action": "lien_connexion"`).
+    Envoi refusé par Supabase (pas de SMTP, limite d'envoi) → 502 avec message clair ; 409 seulement si l'e-mail est pris
+    par un autre compte non lié (jamais rattaché automatiquement).
+  - `DELETE /coach/clients/{id}` → 204 : supprime le compte Supabase Auth lié et la fiche (cascade des données). Effacement RGPD.
 - `web/` : frontend sans build (HTML + Tailwind CDN + supabase-js). `index.html`/`client.js` = application client (PWA),
   `coach/` = espace coach (accès direct Supabase, protégé par la RLS), `config.js` = URL + clé **publishable** uniquement.
-- `docs/mise-en-production.md` : actions réservées au propriétaire (secrets, Railway, Supabase Auth, Systeme.io, Make).
+- `docs/mise-en-production.md` : actions réservées au propriétaire, dans l'ordre (Supabase Auth, Railway, migration,
+  fusion, Systeme.io, Make, statuts, limites, revue de conservation).
 - `docs/politique-confidentialite.md` : projet RGPD à compléter et faire valider.
-- `requirements.txt` épinglé ; `requirements-dev.txt` ajoute pytest.
-- Tests : `.venv\Scripts\python.exe -m pytest -q` (Supabase simulé, aucun appel réseau).
+- `requirements.txt` épinglé ; `requirements-dev.txt` ajoute pytest et python-dotenv.
+- Tests : `.venv\Scripts\python.exe -m pytest -q` (Supabase simulé, aucun appel réseau ; `tests/conftest.py` remet les
+  limiteurs de débit à zéro).
+
+## Production
+
+- En ligne : **https://app-sportoop-backend-production.up.railway.app** (API sur `/`, application client sur `/app/`,
+  espace coach sur `/app/coach/`). Railway déploie `main` (actuellement la fusion de la PR #1, commit `6140486`).
+- Au 2026-09-25 : **aucune variable d'environnement définie sur Railway** (routes de données et webhooks en échec),
+  compte Railway en période d'essai (à passer en formule payante). Étapes restantes : `docs/mise-en-production.md`.
 
 ## Problèmes connus (issus de l'audit)
 
@@ -133,7 +183,18 @@ Réglés en Phase 1 (branche `feat/securite`) : 1, 3, 10 (dépendance), 11.
 Réglés en Phase 2 (branche `feat/schema-v2`, appliqué en base) : 2, 5, 6, 7, 8, 9 ; 12 partiellement (région UE confirmée, colonne `consentement_sante_le`).
 Réglé en Phase 3 (branche `feat/onboarding`) : 4. Reste pour la Phase 3 : webhook Make/Google Forms complet (liste des questions à fournir).
 
-Branches empilées (chacune part de la précédente) : `feat/outillage` → `feat/securite` → `feat/schema-v2` → `feat/nutrition` → `feat/sport` → `feat/onboarding` → `feat/frontend` → `feat/onboarding-formulaire` (contient tout).
+Branches empilées (chacune part de la précédente) : `feat/outillage` → `feat/securite` → `feat/schema-v2` → `feat/nutrition` → `feat/sport` → `feat/onboarding` → `feat/frontend` → `feat/onboarding-formulaire` (contient tout, fusionnée dans `main` par la PR #1).
+
+Audit du 2026-09-25 (branche `fix/audit`, non fusionnée) : statut `EN_ATTENTE` et formulaire reçu une seule fois,
+filtre des offres et ordre des événements Systeme.io, invitation avec diagnostic des refus d'envoi, suppression d'un
+client (effacement RGPD), RLS limitée aux abonnements `ACTIF` et en lecture seule pour les clients (migration
+`20260925_securite_rls_v2.sql` en attente de validation), limitation de débit et tailles maximales, chargement du `.env`
+en local. Reste côté tableau de bord (propriétaire) : fermer les inscriptions publiques Supabase, configurer un SMTP
+personnalisé, protection des mots de passe (plan Pro) ou longueur minimale, Redirect URLs, variables Railway.
+Purge des données après la durée de conservation : revues manuelles (pas de tâche planifiée), mensuelle pour les
+réponses Google Forms, au moins semestrielle pour les fiches (requête sur `statut_modifie_le`, voir
+`docs/mise-en-production.md` étape 10). Formulaire : adresse e-mail vérifiée par Google (pas de question « E-mail »),
+scénario Make en « Data is confidential ».
 Railway : projet `happy-simplicity`, service `app-sportoop-backend`, déploie `main` du dépôt `patroncorrea-ctrl/app-sportoop-backend` (ancien nom `app-sportoop`).
 
 1. Webhook `/webhooks/nouveau-client` **non authentifié** : n'importe qui peut créer des clients.
